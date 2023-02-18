@@ -1,3 +1,5 @@
+# -*- coding: utf-8 -*-
+
 #  This file is part of Tautulli.
 #
 #  Tautulli is free software: you can redistribute it and/or modify
@@ -13,13 +15,13 @@
 #  You should have received a copy of the GNU General Public License
 #  along with Tautulli.  If not, see <http://www.gnu.org/licenses/>.
 
-from logutils.queue import QueueHandler, QueueListener
+from __future__ import unicode_literals
+from future.builtins import str
+
 from logging import handlers
 
-import contextlib
-import errno
+import cherrypy
 import logging
-import multiprocessing
 import os
 import re
 import sys
@@ -27,8 +29,14 @@ import threading
 import traceback
 
 import plexpy
-import helpers
-from plexpy.config import _BLACKLIST_KEYS, _WHITELIST_KEYS
+if plexpy.PYTHON2:
+    import helpers
+    import users
+    from config import _BLACKLIST_KEYS, _WHITELIST_KEYS
+else:
+    from plexpy import helpers, users
+    from plexpy.config import _BLACKLIST_KEYS, _WHITELIST_KEYS
+
 
 # These settings are for file logging only
 FILENAME = "tautulli.log"
@@ -38,6 +46,7 @@ MAX_SIZE = 5000000  # 5 MB
 MAX_FILES = 5
 
 _BLACKLIST_WORDS = set()
+_FILTER_USERNAMES = []
 
 # Tautulli logger
 logger = logging.getLogger("tautulli")
@@ -54,8 +63,8 @@ def blacklist_config(config):
     blacklist = set()
     blacklist_keys = ['HOOK', 'APIKEY', 'KEY', 'PASSWORD', 'TOKEN']
 
-    for key, value in config.iteritems():
-        if isinstance(value, basestring) and len(value.strip()) > 5 and \
+    for key, value in config.items():
+        if isinstance(value, str) and len(value.strip()) > 5 and \
             key.upper() not in _WHITELIST_KEYS and (key.upper() in blacklist_keys or
                                                     any(bk in key.upper() for bk in _BLACKLIST_KEYS)):
             blacklist.add(value.strip())
@@ -63,11 +72,36 @@ def blacklist_config(config):
     _BLACKLIST_WORDS.update(blacklist)
 
 
+def filter_usernames(new_users=None):
+    global _FILTER_USERNAMES
+
+    if new_users is None:
+        new_users = [user['username'] for user in users.Users().get_users()]
+
+    for username in new_users:
+        if username.lower() not in ('local', 'guest') and len(username) > 3 and username not in _FILTER_USERNAMES:
+            _FILTER_USERNAMES.append(username)
+
+    _FILTER_USERNAMES = sorted(_FILTER_USERNAMES, key=len, reverse=True)
+
+
+class LogLevelFilter(logging.Filter):
+    def __init__(self, max_level):
+        super(LogLevelFilter, self).__init__()
+
+        self.max_level = max_level
+
+    def filter(self, record):
+        return record.levelno <= self.max_level
+
+
 class NoThreadFilter(logging.Filter):
     """
     Log filter for the current thread
     """
     def __init__(self, threadName):
+        super(NoThreadFilter, self).__init__()
+        
         self.threadName = threadName
 
     def filter(self, record):
@@ -79,9 +113,6 @@ class BlacklistFilter(logging.Filter):
     """
     Log filter for blacklisted tokens and passwords
     """
-    def __init__(self):
-        pass
-
     def filter(self, record):
         if not plexpy.CONFIG.LOG_BLACKLIST:
             return True
@@ -89,39 +120,83 @@ class BlacklistFilter(logging.Filter):
         for item in _BLACKLIST_WORDS:
             try:
                 if item in record.msg:
-                    record.msg = record.msg.replace(item, 8 * '*' + item[-2:])
-                if any(item in str(arg) for arg in record.args):
-                    record.args = tuple(arg.replace(item, 8 * '*' + item[-2:]) if isinstance(arg, basestring) else arg
-                                        for arg in record.args)
+                    record.msg = record.msg.replace(item, 16 * '*')
+
+                args = []
+                for arg in record.args:
+                    try:
+                        arg_str = str(arg)
+                        if item in arg_str:
+                            arg_str = arg_str.replace(item, 16 * '*')
+                            arg = arg_str
+                    except:
+                        pass
+                    args.append(arg)
+                record.args = tuple(args)
             except:
                 pass
+
         return True
 
 
-class PublicIPFilter(logging.Filter):
+class UsernameFilter(logging.Filter):
     """
-    Log filter for public IP addresses
+    Log filter for usernames
     """
-    def __init__(self):
-        pass
+    def filter(self, record):
+        if not plexpy.CONFIG.LOG_BLACKLIST_USERNAMES:
+            return True
+
+        if not plexpy._INITIALIZED:
+            return True
+
+        for username in _FILTER_USERNAMES:
+            try:
+                record.msg = self.replace(record.msg, username)
+
+                args = []
+                for arg in record.args:
+                    if isinstance(arg, str):
+                        arg = self.replace(arg, username)
+                    args.append(arg)
+                record.args = tuple(args)
+            except:
+                pass
+
+        return True
+
+    @staticmethod
+    def replace(text, match):
+        mask = match[:2] + 8 * '*' + match[-1]
+        return re.sub(re.escape(match), mask, text, flags=re.IGNORECASE)
+
+
+class RegexFilter(logging.Filter):
+    """
+    Base class for regex log filter
+    """
+    REGEX = re.compile(r'')
 
     def filter(self, record):
         if not plexpy.CONFIG.LOG_BLACKLIST:
             return True
 
         try:
-            # Currently only checking for ipv4 addresses
-            ipv4 = re.findall(r'[0-9]+(?:\.[0-9]+){3}(?!\d*-[a-z0-9]{6})', record.msg)
-            for ip in ipv4:
-                if helpers.is_public_ip(ip):
-                    record.msg = record.msg.replace(ip, ip.partition('.')[0] + '.***.***.***')
+            matches = self.REGEX.findall(record.msg)
+            for match in matches:
+                record.msg = self.replace(record.msg, match)
 
             args = []
             for arg in record.args:
-                ipv4 = re.findall(r'[0-9]+(?:\.[0-9]+){3}(?!\d*-[a-z0-9]{6})', arg) if isinstance(arg, basestring) else []
-                for ip in ipv4:
-                    if helpers.is_public_ip(ip):
-                        arg = arg.replace(ip, ip.partition('.')[0] + '.***.***.***')
+                try:
+                    arg_str = str(arg)
+                    matches = self.REGEX.findall(arg_str)
+                    if matches:
+                        for match in matches:
+                            arg_str = self.replace(arg_str, match)
+                        arg = arg_str
+                except:
+                    pass
                 args.append(arg)
             record.args = tuple(args)
         except:
@@ -129,65 +204,68 @@ class PublicIPFilter(logging.Filter):
 
         return True
 
+    def replace(self, text, match):
+        return text
 
-@contextlib.contextmanager
-def listener():
+
+class PublicIPFilter(RegexFilter):
     """
-    Wrapper that create a QueueListener, starts it and automatically stops it.
-    To be used in a with statement in the main process, for multiprocessing.
+    Log filter for public IP addresses
     """
+    REGEX = re.compile(
+        r'(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)[.]){3}'
+        r'(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)'
+        r'(?!\d*-[a-z0-9]{6})'
+    )
 
-    global queue
-
-    # Initialize queue if not already done
-    if queue is None:
-        try:
-            queue = multiprocessing.Queue()
-        except OSError as e:
-            queue = False
-
-            # Some machines don't have access to /dev/shm. See
-            # http://stackoverflow.com/questions/2009278 for more information.
-            if e.errno == errno.EACCES:
-                logger.warning('Multiprocess logging disabled, because '
-                               'current user cannot map shared memory. You won\'t see any' \
-                               'logging generated by the worker processed.')
-
-    # Multiprocess logging may be disabled.
-    if not queue:
-        yield
-    else:
-        queue_listener = QueueListener(queue, *logger.handlers)
-
-        try:
-            queue_listener.start()
-            yield
-        finally:
-            queue_listener.stop()
+    def replace(self, text, ip):
+        if helpers.is_public_ip(ip):
+            return text.replace(ip, '.'.join(['***'] * 4))
+        return text
 
 
-def initMultiprocessing():
+class PlexDirectIPFilter(RegexFilter):
     """
-    Remove all handlers and add QueueHandler on top. This should only be called
-    inside a multiprocessing worker process, since it changes the logger
-    completely.
+    Log filter for IP addresses in plex.direct URL
     """
+    REGEX = re.compile(
+        r'(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)[-]){3}'
+        r'(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)'
+        r'(?!\d*-[a-z0-9]{6})'
+        r'(?=\.[a-z0-9]+\.plex\.direct)'
+    )
 
-    # Multiprocess logging may be disabled.
-    if not queue:
-        return
+    def replace(self, text, ip):
+        if helpers.is_public_ip(ip.replace('-', '.')):
+            return text.replace(ip, '-'.join(['***'] * 4))
+        return text
 
-    # Remove all handlers and add the Queue handler as the only one.
-    for handler in logger.handlers[:]:
-        logger.removeHandler(handler)
 
-    queue_handler = QueueHandler(queue)
-    queue_handler.setLevel(logging.DEBUG)
+class EmailFilter(RegexFilter):
+    """
+    Log filter for email addresses
+    """
+    REGEX = re.compile(
+        r'([a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+)',
+        re.IGNORECASE
+    )
 
-    logger.addHandler(queue_handler)
+    def replace(self, text, email):
+        email_parts = email.partition('@')
+        mask = email_parts[0][:2] + 8 * '*' + email_parts[0][-1] + email_parts[1] + 8 * '*'
+        return text.replace(email, mask)
 
-    # Change current thread name for log record
-    threading.current_thread().name = multiprocessing.current_process().name
+
+class PlexTokenFilter(RegexFilter):
+    """
+    Log filter for X-Plex-Token
+    """
+    REGEX = re.compile(
+        r'X-Plex-Token(?:=|%3D)([a-zA-Z0-9\-_]+)'
+    )
+
+    def replace(self, text, token):
+        return text.replace(token, 16 * '*')
 
 
 def initLogger(console=False, log_dir=False, verbose=False):
@@ -205,7 +283,11 @@ def initLogger(console=False, log_dir=False, verbose=False):
 
     # Close and remove old handlers. This is required to reinit the loggers
     # at runtime
-    for handler in logger.handlers[:] + logger_api.handlers[:] + logger_plex_websocket.handlers[:]:
+    log_handlers = logger.handlers[:] + \
+                   logger_api.handlers[:] + \
+                   logger_plex_websocket.handlers[:] + \
+                   cherrypy.log.error_log.handlers[:]
+    for handler in log_handlers:
         # Just make sure it is cleaned up.
         if isinstance(handler, handlers.RotatingFileHandler):
             handler.close()
@@ -215,6 +297,7 @@ def initLogger(console=False, log_dir=False, verbose=False):
         logger.removeHandler(handler)
         logger_api.removeHandler(handler)
         logger_plex_websocket.removeHandler(handler)
+        cherrypy.log.error_log.removeHandler(handler)
 
     # Configure the logger to accept all messages
     logger.propagate = False
@@ -223,6 +306,7 @@ def initLogger(console=False, log_dir=False, verbose=False):
     logger_api.setLevel(logging.DEBUG if verbose else logging.INFO)
     logger_plex_websocket.propagate = False
     logger_plex_websocket.setLevel(logging.DEBUG if verbose else logging.INFO)
+    cherrypy.log.error_log.propagate = False
 
     # Setup file logger
     if log_dir:
@@ -230,15 +314,16 @@ def initLogger(console=False, log_dir=False, verbose=False):
 
         # Main Tautulli logger
         filename = os.path.join(log_dir, FILENAME)
-        file_handler = handlers.RotatingFileHandler(filename, maxBytes=MAX_SIZE, backupCount=MAX_FILES)
+        file_handler = handlers.RotatingFileHandler(filename, maxBytes=MAX_SIZE, backupCount=MAX_FILES, encoding='utf-8')
         file_handler.setLevel(logging.DEBUG)
         file_handler.setFormatter(file_formatter)
 
         logger.addHandler(file_handler)
+        cherrypy.log.error_log.addHandler(file_handler)
 
         # Tautulli API logger
         filename = os.path.join(log_dir, FILENAME_API)
-        file_handler = handlers.RotatingFileHandler(filename, maxBytes=MAX_SIZE, backupCount=MAX_FILES)
+        file_handler = handlers.RotatingFileHandler(filename, maxBytes=MAX_SIZE, backupCount=MAX_FILES, encoding='utf-8')
         file_handler.setLevel(logging.DEBUG)
         file_handler.setFormatter(file_formatter)
 
@@ -246,7 +331,7 @@ def initLogger(console=False, log_dir=False, verbose=False):
 
         # Tautulli websocket logger
         filename = os.path.join(log_dir, FILENAME_PLEX_WEBSOCKET)
-        file_handler = handlers.RotatingFileHandler(filename, maxBytes=MAX_SIZE, backupCount=MAX_FILES)
+        file_handler = handlers.RotatingFileHandler(filename, maxBytes=MAX_SIZE, backupCount=MAX_FILES, encoding='utf-8')
         file_handler.setLevel(logging.DEBUG)
         file_handler.setFormatter(file_formatter)
 
@@ -255,19 +340,36 @@ def initLogger(console=False, log_dir=False, verbose=False):
     # Setup console logger
     if console:
         console_formatter = logging.Formatter('%(asctime)s - %(levelname)s :: %(threadName)s : %(message)s', '%Y-%m-%d %H:%M:%S')
-        console_handler = logging.StreamHandler()
-        console_handler.setFormatter(console_formatter)
-        console_handler.setLevel(logging.DEBUG)
 
-        logger.addHandler(console_handler)
+        stdout_handler = logging.StreamHandler(sys.stdout)
+        stdout_handler.setFormatter(console_formatter)
+        stdout_handler.setLevel(logging.DEBUG)
+        stdout_handler.addFilter(LogLevelFilter(logging.INFO))
+
+        stderr_handler = logging.StreamHandler(sys.stderr)
+        stderr_handler.setFormatter(console_formatter)
+        stderr_handler.setLevel(logging.WARNING)
+
+        logger.addHandler(stdout_handler)
+        logger.addHandler(stderr_handler)
+        cherrypy.log.error_log.addHandler(stdout_handler)
+        cherrypy.log.error_log.addHandler(stderr_handler)
 
     # Add filters to log handlers
     # Only add filters after the config file has been initialized
     # Nothing prior to initialization should contain sensitive information
     if not plexpy.DEV and plexpy.CONFIG:
-        for handler in logger.handlers + logger_api.handlers + logger_plex_websocket.handlers:
+        log_handlers = logger.handlers + \
+                       logger_api.handlers + \
+                       logger_plex_websocket.handlers + \
+                       cherrypy.log.error_log.handlers
+        for handler in log_handlers:
             handler.addFilter(BlacklistFilter())
             handler.addFilter(PublicIPFilter())
+            handler.addFilter(PlexDirectIPFilter())
+            handler.addFilter(EmailFilter())
+            handler.addFilter(UsernameFilter())
+            handler.addFilter(PlexTokenFilter())
 
     # Install exception hooks
     initHooks()
@@ -329,7 +431,7 @@ def shutdown():
 # Expose logger methods
 # Main Tautulli logger
 info = logger.info
-warn = logger.warn
+warn = logger.warning
 error = logger.error
 debug = logger.debug
 warning = logger.warning
@@ -337,7 +439,7 @@ exception = logger.exception
 
 # Tautulli API logger
 api_info = logger_api.info
-api_warn = logger_api.warn
+api_warn = logger_api.warning
 api_error = logger_api.error
 api_debug = logger_api.debug
 api_warning = logger_api.warning
@@ -345,7 +447,7 @@ api_exception = logger_api.exception
 
 # Tautulli websocket logger
 websocket_info = logger_plex_websocket.info
-websocket_warn = logger_plex_websocket.warn
+websocket_warn = logger_plex_websocket.warning
 websocket_error = logger_plex_websocket.error
 websocket_debug = logger_plex_websocket.debug
 websocket_warning = logger_plex_websocket.warning

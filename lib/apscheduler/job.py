@@ -1,4 +1,4 @@
-from collections import Iterable, Mapping
+from inspect import ismethod, isclass
 from uuid import uuid4
 
 import six
@@ -7,6 +7,11 @@ from apscheduler.triggers.base import BaseTrigger
 from apscheduler.util import (
     ref_to_obj, obj_to_ref, datetime_repr, repr_escape, get_callable_name, check_callable_args,
     convert_to_datetime)
+
+try:
+    from collections.abc import Iterable, Mapping
+except ImportError:
+    from collections import Iterable, Mapping
 
 
 class Job(object):
@@ -23,7 +28,7 @@ class Job(object):
     :var trigger: the trigger object that controls the schedule of this job
     :var str executor: the name of the executor that will run this job
     :var int misfire_grace_time: the time (in seconds) how much this job's execution is allowed to
-        be late
+        be late (``None`` means "allow the job to run no matter how late it is")
     :var int max_instances: the maximum number of concurrently executing instances allowed for this
         job
     :var datetime.datetime next_run_time: the next scheduled run time of this job
@@ -35,7 +40,7 @@ class Job(object):
 
     __slots__ = ('_scheduler', '_jobstore_alias', 'id', 'trigger', 'executor', 'func', 'func_ref',
                  'args', 'kwargs', 'name', 'misfire_grace_time', 'coalesce', 'max_instances',
-                 'next_run_time')
+                 'next_run_time', '__weakref__')
 
     def __init__(self, scheduler, id=None, **kwargs):
         super(Job, self).__init__()
@@ -235,13 +240,21 @@ class Job(object):
                 'be determined. Consider giving a textual reference (module:function name) '
                 'instead.' % (self.func,))
 
+        # Instance methods cannot survive serialization as-is, so store the "self" argument
+        # explicitly
+        func = self.func
+        if ismethod(func) and not isclass(func.__self__) and obj_to_ref(func) == self.func_ref:
+            args = (func.__self__,) + tuple(self.args)
+        else:
+            args = self.args
+
         return {
             'version': 1,
             'id': self.id,
             'func': self.func_ref,
             'trigger': self.trigger,
             'executor': self.executor,
-            'args': self.args,
+            'args': args,
             'kwargs': self.kwargs,
             'name': self.name,
             'misfire_grace_time': self.misfire_grace_time,

@@ -1,21 +1,97 @@
 # -*- coding: utf-8 -*-
+import base64
+import functools
+import json
 import logging
 import os
 import re
-import requests
+import string
 import time
+import unicodedata
+import warnings
 import zipfile
+from collections import deque
 from datetime import datetime
 from getpass import getpass
-from threading import Thread
-from tqdm import tqdm
-from plexapi import compat
-from plexapi.exceptions import NotFound
+from threading import Event, Thread
+from urllib.parse import quote
+
+import requests
+from plexapi.exceptions import BadRequest, NotFound
+
+try:
+    from tqdm import tqdm
+except ImportError:
+    tqdm = None
+
+try:
+    from functools import cached_property
+except ImportError:
+    from backports.cached_property import cached_property  # noqa: F401
+
+log = logging.getLogger('plexapi')
 
 # Search Types - Plex uses these to filter specific media types when searching.
-# Library Types - Populated at runtime
-SEARCHTYPES = {'movie': 1, 'show': 2, 'season': 3, 'episode': 4,
-               'artist': 8, 'album': 9, 'track': 10, 'photo': 14}
+SEARCHTYPES = {
+    'movie': 1,
+    'show': 2,
+    'season': 3,
+    'episode': 4,
+    'trailer': 5,
+    'comic': 6,
+    'person': 7,
+    'artist': 8,
+    'album': 9,
+    'track': 10,
+    'picture': 11,
+    'clip': 12,
+    'photo': 13,
+    'photoalbum': 14,
+    'playlist': 15,
+    'playlistFolder': 16,
+    'collection': 18,
+    'optimizedVersion': 42,
+    'userPlaylistItem': 1001,
+}
+# Tag Types - Plex uses these to filter specific tags when searching.
+TAGTYPES = {
+    'tag': 0,
+    'genre': 1,
+    'collection': 2,
+    'director': 4,
+    'writer': 5,
+    'role': 6,
+    'producer': 7,
+    'country': 8,
+    'chapter': 9,
+    'review': 10,
+    'label': 11,
+    'marker': 12,
+    'mediaProcessingTarget': 42,
+    'make': 200,
+    'model': 201,
+    'aperture': 202,
+    'exposure': 203,
+    'iso': 204,
+    'lens': 205,
+    'device': 206,
+    'autotag': 207,
+    'mood': 300,
+    'style': 301,
+    'format': 302,
+    'similar': 305,
+    'concert': 306,
+    'banner': 311,
+    'poster': 312,
+    'art': 313,
+    'guid': 314,
+    'ratingImage': 316,
+    'theme': 317,
+    'studio': 318,
+    'network': 319,
+    'place': 400,
+}
+# Plex Objects - Populated at runtime
 PLEXOBJECTS = {}
 
 
@@ -33,7 +109,7 @@ class SecretsFilter(logging.Filter):
     def filter(self, record):
         cleanargs = list(record.args)
         for i in range(len(cleanargs)):
-            if isinstance(cleanargs[i], compat.string_type):
+            if isinstance(cleanargs[i], str):
                 for secret in self.secrets:
                     cleanargs[i] = cleanargs[i].replace(secret, '<hidden>')
         record.args = tuple(cleanargs)
@@ -42,29 +118,37 @@ class SecretsFilter(logging.Filter):
 
 def registerPlexObject(cls):
     """ Registry of library types we may come across when parsing XML. This allows us to
-        define a few helper functions to dynamically convery the XML into objects. See
+        define a few helper functions to dynamically convert the XML into objects. See
         buildItem() below for an example.
     """
-    etype = getattr(cls, 'STREAMTYPE', cls.TYPE)
-    ehash = '%s.%s' % (cls.TAG, etype) if etype else cls.TAG
+    etype = getattr(cls, 'STREAMTYPE', getattr(cls, 'TAGTYPE', cls.TYPE))
+    ehash = f'{cls.TAG}.{etype}' if etype else cls.TAG
+    if getattr(cls, '_SESSIONTYPE', None):
+        ehash = f"{ehash}.{'session'}"
     if ehash in PLEXOBJECTS:
-        raise Exception('Ambiguous PlexObject definition %s(tag=%s, type=%s) with %s' %
-            (cls.__name__, cls.TAG, etype, PLEXOBJECTS[ehash].__name__))
+        raise Exception(f'Ambiguous PlexObject definition {cls.__name__}(tag={cls.TAG}, type={etype}) '
+                        f'with {PLEXOBJECTS[ehash].__name__}')
     PLEXOBJECTS[ehash] = cls
     return cls
 
 
 def cast(func, value):
     """ Cast the specified value to the specified type (returned by func). Currently this
-        only support int, float, bool. Should be extended if needed.
+        only support str, int, float, bool. Should be extended if needed.
 
         Parameters:
-            func (func): Calback function to used cast to type (int, bool, float).
+            func (func): Callback function to used cast to type (int, bool, float).
             value (any): value to be cast and returned.
     """
     if value is not None:
         if func == bool:
-            return bool(int(value))
+            if value in (1, True, "1", "true"):
+                return True
+            elif value in (0, False, "0", "false"):
+                return False
+            else:
+                raise ValueError(value)
+
         elif func in (int, float):
             try:
                 return func(value)
@@ -85,9 +169,9 @@ def joinArgs(args):
         return ''
     arglist = []
     for key in sorted(args, key=lambda x: x.lower()):
-        value = compat.ustr(args[key])
-        arglist.append('%s=%s' % (key, compat.quote(value)))
-    return '?%s' % '&'.join(arglist)
+        value = str(args[key])
+        arglist.append(f"{key}={quote(value, safe='')}")
+    return f"?{'&'.join(arglist)}"
 
 
 def lowerFirst(s):
@@ -95,8 +179,8 @@ def lowerFirst(s):
 
 
 def rget(obj, attrstr, default=None, delim='.'):  # pragma: no cover
-    """ Returns the value at the specified attrstr location within a nexted tree of
-        dicts, lists, tuples, functions, classes, etc. The lookup is done recursivley
+    """ Returns the value at the specified attrstr location within a nested tree of
+        dicts, lists, tuples, functions, classes, etc. The lookup is done recursively
         for each key in attrstr (split by by the delimiter) This function is heavily
         influenced by the lookups used in Django templates.
 
@@ -129,37 +213,94 @@ def searchType(libtype):
     """ Returns the integer value of the library string type.
 
         Parameters:
-            libtype (str): LibType to lookup (movie, show, season, episode, artist, album, track)
+            libtype (str): LibType to lookup (See :data:`~plexapi.utils.SEARCHTYPES`)
 
         Raises:
-            NotFound: Unknown libtype
+            :exc:`~plexapi.exceptions.NotFound`: Unknown libtype
     """
-    libtype = compat.ustr(libtype)
-    if libtype in [compat.ustr(v) for v in SEARCHTYPES.values()]:
+    libtype = str(libtype)
+    if libtype in [str(v) for v in SEARCHTYPES.values()]:
         return libtype
     if SEARCHTYPES.get(libtype) is not None:
         return SEARCHTYPES[libtype]
-    raise NotFound('Unknown libtype: %s' % libtype)
+    raise NotFound(f'Unknown libtype: {libtype}')
+
+
+def reverseSearchType(libtype):
+    """ Returns the string value of the library type.
+
+        Parameters:
+            libtype (int): Integer value of the library type.
+
+        Raises:
+            :exc:`~plexapi.exceptions.NotFound`: Unknown libtype
+    """
+    if libtype in SEARCHTYPES:
+        return libtype
+    libtype = int(libtype)
+    for k, v in SEARCHTYPES.items():
+        if libtype == v:
+            return k
+    raise NotFound(f'Unknown libtype: {libtype}')
+
+
+def tagType(tag):
+    """ Returns the integer value of the library tag type.
+
+        Parameters:
+            tag (str): Tag to lookup (See :data:`~plexapi.utils.TAGTYPES`)
+
+        Raises:
+            :exc:`~plexapi.exceptions.NotFound`: Unknown tag
+    """
+    tag = str(tag)
+    if tag in [str(v) for v in TAGTYPES.values()]:
+        return tag
+    if TAGTYPES.get(tag) is not None:
+        return TAGTYPES[tag]
+    raise NotFound(f'Unknown tag: {tag}')
+
+
+def reverseTagType(tag):
+    """ Returns the string value of the library tag type.
+
+        Parameters:
+            tag (int): Integer value of the library tag type.
+
+        Raises:
+            :exc:`~plexapi.exceptions.NotFound`: Unknown tag
+    """
+    if tag in TAGTYPES:
+        return tag
+    tag = int(tag)
+    for k, v in TAGTYPES.items():
+        if tag == v:
+            return k
+    raise NotFound(f'Unknown tag: {tag}')
 
 
 def threaded(callback, listargs):
-    """ Returns the result of <callback> for each set of \*args in listargs. Each call
-        to <callback. is called concurrently in their own separate threads.
+    """ Returns the result of <callback> for each set of `*args` in listargs. Each call
+        to <callback> is called concurrently in their own separate threads.
 
         Parameters:
-            callback (func): Callback function to apply to each set of \*args.
-            listargs (list): List of lists; \*args to pass each thread.
+            callback (func): Callback function to apply to each set of `*args`.
+            listargs (list): List of lists; `*args` to pass each thread.
     """
     threads, results = [], []
+    job_is_done_event = Event()
     for args in listargs:
         args += [results, len(results)]
         results.append(None)
-        threads.append(Thread(target=callback, args=args))
-        threads[-1].setDaemon(True)
+        threads.append(Thread(target=callback, args=args, kwargs=dict(job_is_done_event=job_is_done_event)))
+        threads[-1].daemon = True
         threads[-1].start()
-    for thread in threads:
-        thread.join()
-    return results
+    while not job_is_done_event.is_set():
+        if all(not t.is_alive() for t in threads):
+            break
+        time.sleep(0.05)
+
+    return [r for r in results if r is not None]
 
 
 def toDatetime(value, format=None):
@@ -171,10 +312,31 @@ def toDatetime(value, format=None):
     """
     if value and value is not None:
         if format:
-            value = datetime.strptime(value, format)
+            try:
+                value = datetime.strptime(value, format)
+            except ValueError:
+                log.info('Failed to parse %s to datetime, defaulting to None', value)
+                return None
         else:
+            # https://bugs.python.org/issue30684
+            # And platform support for before epoch seems to be flaky.
+            # Also limit to max 32-bit integer
+            value = min(max(int(value), 86400), 2**31 - 1)
             value = datetime.fromtimestamp(int(value))
     return value
+
+
+def millisecondToHumanstr(milliseconds):
+    """ Returns human readable time duration from milliseconds.
+        HH:MM:SS:MMMM
+
+        Parameters:
+            milliseconds (str,int): time duration in milliseconds.
+    """
+    milliseconds = int(milliseconds)
+    r = datetime.utcfromtimestamp(milliseconds / 1000)
+    f = r.strftime("%H:%M:%S.%f")
+    return f[:-2]
 
 
 def toList(value, itemcast=None, delim=','):
@@ -188,6 +350,13 @@ def toList(value, itemcast=None, delim=','):
     value = value or ''
     itemcast = itemcast or str
     return [itemcast(item) for item in value.split(delim) if item != '']
+
+
+def cleanFilename(filename, replace='_'):
+    whitelist = f"-_.()[] {string.ascii_letters}{string.digits}"
+    cleaned_filename = unicodedata.normalize('NFKD', filename).encode('ASCII', 'ignore').decode()
+    cleaned_filename = ''.join(c if c in whitelist else replace for c in cleaned_filename)
+    return cleaned_filename
 
 
 def downloadSessionImages(server, filename=None, height=150, width=150,
@@ -212,11 +381,11 @@ def downloadSessionImages(server, filename=None, height=150, width=150,
             if media.thumb:
                 url = media.thumb
             if part.indexes:  # always use bif images if available.
-                url = '/library/parts/%s/indexes/%s/%s' % (part.id, part.indexes.lower(), media.viewOffset)
+                url = f'/library/parts/{part.id}/indexes/{part.indexes.lower()}/{media.viewOffset}'
         if url:
             if filename is None:
                 prettyname = media._prettyfilename()
-                filename = 'session_transcode_%s_%s_%s' % (media.usernames[0], prettyname, int(time.time()))
+                filename = f'session_transcode_{media.usernames[0]}_{prettyname}_{int(time.time())}'
             url = server.transcodeImage(url, height, width, opacity, saturation)
             filepath = download(url, filename=filename)
             info['username'] = {'filepath': filepath, 'url': url}
@@ -234,7 +403,7 @@ def download(url, token, filename=None, savepath=None, session=None, chunksize=4
             filename (str): Filename of the downloaded file, default None.
             savepath (str): Defaults to current working dir.
             chunksize (int): What chunksize read/write at the time.
-            mocked (bool): Helper to do evertything except write the file.
+            mocked (bool): Helper to do everything except write the file.
             unpack (bool): Unpack the zip file.
             showstatus(bool): Display a progressbar.
 
@@ -242,15 +411,13 @@ def download(url, token, filename=None, savepath=None, session=None, chunksize=4
             >>> download(a_episode.getStreamURL(), a_episode.location)
             /path/to/file
     """
-
-    from plexapi import log
     # fetch the data to be saved
     session = session or requests.Session()
     headers = {'X-Plex-Token': token}
     response = session.get(url, headers=headers, stream=True)
     # make sure the savepath directory exists
     savepath = savepath or os.getcwd()
-    compat.makedirs(savepath, exist_ok=True)
+    os.makedirs(savepath, exist_ok=True)
 
     # try getting filename from header if not specified in arguments (used for logs, db)
     if not filename and response.headers.get('Content-Disposition'):
@@ -273,17 +440,17 @@ def download(url, token, filename=None, savepath=None, session=None, chunksize=4
 
     # save the file to disk
     log.info('Downloading: %s', fullpath)
-    if showstatus:  # pragma: no cover
+    if showstatus and tqdm:  # pragma: no cover
         total = int(response.headers.get('content-length', 0))
         bar = tqdm(unit='B', unit_scale=True, total=total, desc=filename)
 
     with open(fullpath, 'wb') as handle:
         for chunk in response.iter_content(chunk_size=chunksize):
             handle.write(chunk)
-            if showstatus:
+            if showstatus and tqdm:
                 bar.update(len(chunk))
 
-    if showstatus:  # pragma: no cover
+    if showstatus and tqdm:  # pragma: no cover
         bar.close()
     # check we want to unzip the contents
     if fullpath.endswith('zip') and unpack:
@@ -291,22 +458,6 @@ def download(url, token, filename=None, savepath=None, session=None, chunksize=4
             handle.extractall(savepath)
 
     return fullpath
-
-
-def tag_helper(tag, items, locked=True, remove=False):
-    """ Simple tag helper for editing a object. """
-    if not isinstance(items, list):
-        items = [items]
-    data = {}
-    if not remove:
-        for i, item in enumerate(items):
-            tagname = '%s[%s].tag.tag' % (tag, i)
-            data[tagname] = item
-    if remove:
-        tagname = '%s[].tag.tag-' % tag
-        data[tagname] = ','.join(items)
-    data['%s.locked' % tag] = 1 if locked else 0
-    return data
 
 
 def getMyPlexAccount(opts=None):  # pragma: no cover
@@ -321,19 +472,74 @@ def getMyPlexAccount(opts=None):  # pragma: no cover
     from plexapi.myplex import MyPlexAccount
     # 1. Check command-line options
     if opts and opts.username and opts.password:
-        print('Authenticating with Plex.tv as %s..' % opts.username)
+        print(f'Authenticating with Plex.tv as {opts.username}..')
         return MyPlexAccount(opts.username, opts.password)
     # 2. Check Plexconfig (environment variables and config.ini)
     config_username = CONFIG.get('auth.myplex_username')
     config_password = CONFIG.get('auth.myplex_password')
     if config_username and config_password:
-        print('Authenticating with Plex.tv as %s..' % config_username)
+        print(f'Authenticating with Plex.tv as {config_username}..')
         return MyPlexAccount(config_username, config_password)
+    config_token = CONFIG.get('auth.server_token')
+    if config_token:
+        print('Authenticating with Plex.tv with token')
+        return MyPlexAccount(token=config_token)
     # 3. Prompt for username and password on the command line
     username = input('What is your plex.tv username: ')
     password = getpass('What is your plex.tv password: ')
-    print('Authenticating with Plex.tv as %s..' % username)
+    print(f'Authenticating with Plex.tv as {username}..')
     return MyPlexAccount(username, password)
+
+
+def createMyPlexDevice(headers, account, timeout=10):  # pragma: no cover
+    """ Helper function to create a new MyPlexDevice. Returns a new MyPlexDevice instance.
+
+        Parameters:
+            headers (dict): Provide the X-Plex- headers for the new device.
+                A unique X-Plex-Client-Identifier is required.
+            account (MyPlexAccount): The Plex account to create the device on.
+            timeout (int): Timeout in seconds to wait for device login.
+    """
+    from plexapi.myplex import MyPlexPinLogin
+
+    if 'X-Plex-Client-Identifier' not in headers:
+        raise BadRequest('The X-Plex-Client-Identifier header is required.')
+
+    clientIdentifier = headers['X-Plex-Client-Identifier']
+
+    pinlogin = MyPlexPinLogin(headers=headers)
+    pinlogin.run(timeout=timeout)
+    account.link(pinlogin.pin)
+    pinlogin.waitForLogin()
+
+    return account.device(clientId=clientIdentifier)
+
+
+def plexOAuth(headers, forwardUrl=None, timeout=120):  # pragma: no cover
+    """ Helper function for Plex OAuth login. Returns a new MyPlexAccount instance.
+
+        Parameters:
+            headers (dict): Provide the X-Plex- headers for the new device.
+                A unique X-Plex-Client-Identifier is required.
+            forwardUrl (str, optional): The url to redirect the client to after login.
+            timeout (int, optional): Timeout in seconds to wait for device login. Default 120 seconds.
+    """
+    from plexapi.myplex import MyPlexAccount, MyPlexPinLogin
+
+    if 'X-Plex-Client-Identifier' not in headers:
+        raise BadRequest('The X-Plex-Client-Identifier header is required.')
+
+    pinlogin = MyPlexPinLogin(headers=headers, oauth=True)
+    print('Login to Plex at the following url:')
+    print(pinlogin.oauthUrl(forwardUrl))
+    pinlogin.run(timeout=timeout)
+    pinlogin.waitForLogin()
+
+    if pinlogin.token:
+        print('Login successful!')
+        return MyPlexAccount(token=pinlogin.token)
+    else:
+        print('Login failed.')
 
 
 def choose(msg, items, attr):  # pragma: no cover
@@ -347,12 +553,12 @@ def choose(msg, items, attr):  # pragma: no cover
     print()
     for index, i in enumerate(items):
         name = attr(i) if callable(attr) else getattr(i, attr)
-        print('  %s: %s' % (index, name))
+        print(f'  {index}: {name}')
     print()
     # Request choice from the user
     while True:
         try:
-            inp = input('%s: ' % msg)
+            inp = input(f'{msg}: ')
             if any(s in inp for s in (':', '::', '-')):
                 idx = slice(*map(lambda x: int(x.strip()) if x.strip() else None, inp.split(':')))
                 return items[idx]
@@ -361,3 +567,66 @@ def choose(msg, items, attr):  # pragma: no cover
 
         except (ValueError, IndexError):
             pass
+
+
+def getAgentIdentifier(section, agent):
+    """ Return the full agent identifier from a short identifier, name, or confirm full identifier. """
+    agents = []
+    for ag in section.agents():
+        identifiers = [ag.identifier, ag.shortIdentifier, ag.name]
+        if agent in identifiers:
+            return ag.identifier
+        agents += identifiers
+    raise NotFound(f"Could not find \"{agent}\" in agents list ({', '.join(agents)})")
+
+
+def base64str(text):
+    return base64.b64encode(text.encode('utf-8')).decode('utf-8')
+
+
+def deprecated(message, stacklevel=2):
+    def decorator(func):
+        """This is a decorator which can be used to mark functions
+        as deprecated. It will result in a warning being emitted
+        when the function is used."""
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            msg = f'Call to deprecated function or method "{func.__name__}", {message}.'
+            warnings.warn(msg, category=DeprecationWarning, stacklevel=stacklevel)
+            log.warning(msg)
+            return func(*args, **kwargs)
+        return wrapper
+    return decorator
+
+
+def iterXMLBFS(root, tag=None):
+    """ Iterate through an XML tree using a breadth-first search.
+        If tag is specified, only return nodes with that tag.
+    """
+    queue = deque([root])
+    while queue:
+        node = queue.popleft()
+        if tag is None or node.tag == tag:
+            yield node
+        queue.extend(list(node))
+
+
+def toJson(obj, **kwargs):
+    """ Convert an object to a JSON string.
+
+        Parameters:
+            obj (object): The object to convert.
+            **kwargs (dict): Keyword arguments to pass to ``json.dumps()``.
+    """
+    def serialize(obj):
+        if isinstance(obj, datetime):
+            return obj.isoformat()
+        return {k: v for k, v in obj.__dict__.items() if not k.startswith('_')}
+    return json.dumps(obj, default=serialize, **kwargs)
+
+
+def openOrRead(file):
+    if hasattr(file, 'read'):
+        return file.read()
+    with open(file, 'rb') as f:
+        return f.read()

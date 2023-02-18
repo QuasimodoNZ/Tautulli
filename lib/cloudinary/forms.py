@@ -1,10 +1,11 @@
-from django import forms
-from cloudinary import CloudinaryResource
+import json
+import re
+
 import cloudinary.uploader
 import cloudinary.utils
-import re
-import json
-from django.utils.translation import ugettext_lazy as _
+from cloudinary import CloudinaryResource
+from django import forms
+from django.utils.translation import gettext_lazy as _
 
 
 def cl_init_js_callbacks(form, request):
@@ -16,8 +17,8 @@ def cl_init_js_callbacks(form, request):
 class CloudinaryInput(forms.TextInput):
     input_type = 'file'
 
-    def render(self, name, value, attrs=None):
-        attrs = self.build_attrs(attrs)
+    def render(self, name, value, attrs=None, renderer=None):
+        attrs = dict(self.attrs, **attrs)
         options = attrs.get('options', {})
         attrs["options"] = ''
 
@@ -27,14 +28,16 @@ class CloudinaryInput(forms.TextInput):
         else:
             params = cloudinary.utils.sign_request(params, options)
 
-        if 'resource_type' not in options: options['resource_type'] = 'auto'
+        if 'resource_type' not in options:
+            options['resource_type'] = 'auto'
         cloudinary_upload_url = cloudinary.utils.cloudinary_api_url("upload", **options)
 
         attrs["data-url"] = cloudinary_upload_url
         attrs["data-form-data"] = json.dumps(params)
         attrs["data-cloudinary-field"] = name
         chunk_size = options.get("chunk_size", None)
-        if chunk_size: attrs["data-max-chunk-size"] = chunk_size
+        if chunk_size:
+            attrs["data-max-chunk-size"] = chunk_size
         attrs["class"] = " ".join(["cloudinary-fileupload", attrs.get("class", "")])
 
         widget = super(CloudinaryInput, self).render("file", None, attrs=attrs)
@@ -49,12 +52,14 @@ class CloudinaryInput(forms.TextInput):
 
 class CloudinaryJsFileField(forms.Field):
     default_error_messages = {
-        'required': _(u"No file selected!")
+        "required": _("No file selected!")
     }
 
     def __init__(self, attrs=None, options=None, autosave=True, *args, **kwargs):
-        if attrs is None: attrs = {}
-        if options is None: options = {}
+        if attrs is None:
+            attrs = {}
+        if options is None:
+            options = {}
         self.autosave = autosave
         attrs = attrs.copy()
         attrs["options"] = options.copy()
@@ -70,7 +75,8 @@ class CloudinaryJsFileField(forms.Field):
 
     def to_python(self, value):
         """Convert to CloudinaryResource"""
-        if not value: return None
+        if not value:
+            return None
         m = re.search(r'^([^/]+)/([^/]+)/v(\d+)/([^#]+)#([^/]+)$', value)
         if not m:
             raise forms.ValidationError("Invalid format")
@@ -95,7 +101,8 @@ class CloudinaryJsFileField(forms.Field):
         """Validate the signature"""
         # Use the parent's handling of required fields, etc.
         super(CloudinaryJsFileField, self).validate(value)
-        if not value: return
+        if not value:
+            return
         if not value.validate():
             raise forms.ValidationError("Signature mismatch")
 
@@ -108,16 +115,17 @@ class CloudinaryUnsignedJsFileField(CloudinaryJsFileField):
             options = {}
         options = options.copy()
         options.update({"unsigned": True, "upload_preset": upload_preset})
-        super(CloudinaryUnsignedJsFileField, self).__init__(attrs, options, autosave, *args, **kwargs)
+        super(CloudinaryUnsignedJsFileField, self).__init__(
+            attrs, options, autosave, *args, **kwargs)
 
 
 class CloudinaryFileField(forms.FileField):
     my_default_error_messages = {
-        'required': _(u"No file selected!")
+        "required": _("No file selected!")
     }
     default_error_messages = forms.FileField.default_error_messages.copy()
     default_error_messages.update(my_default_error_messages)
-    
+
     def __init__(self, options=None, autosave=True, *args, **kwargs):
         self.autosave = autosave
         self.options = options or {}

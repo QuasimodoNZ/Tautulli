@@ -1,4 +1,6 @@
-﻿#  This file is part of Tautulli.
+﻿# -*- coding: utf-8 -*-
+
+#  This file is part of Tautulli.
 #
 #  Tautulli is free software: you can redistribute it and/or modify
 #  it under the terms of the GNU General Public License as published by
@@ -13,10 +15,18 @@
 #  You should have received a copy of the GNU General Public License
 #  along with Tautulli.  If not, see <http://www.gnu.org/licenses/>.
 
+from __future__ import unicode_literals
+from future.builtins import str
+
 import cherrypy
 
-import common
-import users
+import plexpy
+if plexpy.PYTHON2:
+    import common
+    import users
+else:
+    from plexpy import common
+    from plexpy import users
 
 
 def get_session_info():
@@ -46,6 +56,22 @@ def get_session_user_id():
     """
     _session = get_session_info()
     return str(_session['user_id']) if _session['user_group'] == 'guest' and _session['user_id'] else None
+
+
+def get_session_user_token():
+    """
+    Returns the user's server_token for the current logged in session
+    """
+    _session = get_session_info()
+
+    if _session['user_group'] == 'guest' and _session['user_id']:
+        session_user_tokens = users.Users().get_tokens(_session['user_id'])
+        user_token = session_user_tokens['server_token']
+    else:
+        user_token = plexpy.CONFIG.PMS_TOKEN
+
+    return user_token
+
 
 def get_session_shared_libraries():
     """
@@ -185,45 +211,76 @@ def mask_session_info(list_of_dicts, mask_metadata=True):
     session_library_ids = get_session_shared_libraries()
     session_library_filters = get_session_library_filters()
 
-    keys_to_mask = {'user_id': '',
-                    'user': 'Plex User',
-                    'friendly_name': 'Plex User',
-                    'user_thumb': common.DEFAULT_USER_THUMB,
-                    'ip_address': 'N/A',
-                    'machine_id': '',
-                    'player': 'Player'
-                    }
+    keys_to_mask = {
+        'user_id': '',
+        'user': 'Plex User',
+        'username': 'Plex User',
+        'email': '',
+        'friendly_name': 'Plex User',
+        'user_thumb': common.DEFAULT_USER_THUMB,
+        'ip_address': 'N/A',
+        'ip_address_public': 'N/A',
+        'machine_id': '',
+        'player': 'Player'
+    }
 
-    metadata_to_mask = {'media_index': '0',
-                        'parent_media_index': '0',
-                        'art': common.DEFAULT_ART,
-                        'parent_thumb': common.DEFAULT_POSTER_THUMB,
-                        'grandparent_thumb': common.DEFAULT_POSTER_THUMB,
-                        'thumb': common.DEFAULT_POSTER_THUMB,
-                        'bif_thumb': '',
-                        'title': 'Plex Media',
-                        'parent_title': 'Plex Media',
-                        'grandparent_title': 'Plex Media',
-                        'original_title': 'Plex Media',
-                        'rating_key': '',
-                        'parent_rating_key': '',
-                        'grandparent_rating_key': '',
-                        'year': '',
-                        'last_played': 'Plex Media'
-                        }
+    metadata_to_mask = {
+        'actors': [],
+        'art': common.DEFAULT_ART,
+        'bif_thumb': '',
+        'content_rating': '',
+        'directors': [],
+        'edition_title': '',
+        'file': '',
+        'full_title': 'Plex Media',
+        'genres': [],
+        'grandparent_guid': '',
+        'grandparent_guids': [],
+        'grandparent_rating_key': '',
+        'grandparent_thumb': common.DEFAULT_POSTER_THUMB,
+        'grandparent_title': 'Plex Media',
+        'grandparent_year': '',
+        'guid': '',
+        'guids': [],
+        'labels': [],
+        'library_name': '',
+        'media_index': '0',
+        'original_title': 'Plex Media',
+        'originally_available_at': '',
+        'parent_guid': '',
+        'parent_guids': [],
+        'parent_media_index': '0',
+        'parent_rating_key': '',
+        'parent_thumb': common.DEFAULT_POSTER_THUMB,
+        'parent_title': 'Plex Media',
+        'parent_year': '',
+        'rating_key': '',
+        'section_id': '',
+        'shared_libraries': [],
+        'sort_title': 'Plex Media',
+        'studio': '',
+        'summary': '',
+        'tagline': '',
+        'thumb': common.DEFAULT_POSTER_THUMB,
+        'title': 'Plex Media',
+        'writers': [],
+        'year': '',
+
+        'last_played': 'Plex Media',
+    }
 
     list_of_dicts = friendly_name_to_username(list_of_dicts)
 
     for d in list_of_dicts:
         if session_user_id and not (str(d.get('user_id')) == session_user_id or d.get('user') == session_user):
-            for k, v in keys_to_mask.iteritems():
+            for k, v in keys_to_mask.items():
                 if k in d: d[k] = keys_to_mask[k]
 
         if not mask_metadata:
             continue
 
         if str(d.get('section_id','')) not in session_library_ids:
-            for k, v in metadata_to_mask.iteritems():
+            for k, v in metadata_to_mask.items():
                 if k in d: d[k] = metadata_to_mask[k]
             continue
 
@@ -247,7 +304,7 @@ def mask_session_info(list_of_dicts, mask_metadata=True):
                 if d_content_rating in f_content_rating or set(d_labels).intersection(set(f_labels)):
                     continue
 
-            for k, v in metadata_to_mask.iteritems():
+            for k, v in metadata_to_mask.items():
                 if k in d: d[k] = metadata_to_mask[k]
 
     return list_of_dicts

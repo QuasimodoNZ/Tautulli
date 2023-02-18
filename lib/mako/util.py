@@ -1,15 +1,18 @@
 # mako/util.py
-# Copyright (C) 2006-2015 the Mako authors and contributors <see AUTHORS file>
+# Copyright 2006-2022 the Mako authors and contributors <see AUTHORS file>
 #
 # This module is part of Mako and is released under
 # the MIT License: http://www.opensource.org/licenses/mit-license.php
-
-import re
-import collections
+from ast import parse
 import codecs
-import os
-from mako import compat
+import collections
 import operator
+import os
+import re
+import timeit
+
+from .compat import importlib_metadata_get
+
 
 def update_wrapper(decorated, fn):
     decorated.__wrapped__ = fn
@@ -17,7 +20,7 @@ def update_wrapper(decorated, fn):
     return decorated
 
 
-class PluginLoader(object):
+class PluginLoader:
     def __init__(self, group):
         self.group = group
         self.impls = {}
@@ -25,18 +28,17 @@ class PluginLoader(object):
     def load(self, name):
         if name in self.impls:
             return self.impls[name]()
-        else:
-            import pkg_resources
-            for impl in pkg_resources.iter_entry_points(
-                                self.group,
-                                name):
+
+        for impl in importlib_metadata_get(self.group):
+            if impl.name == name:
                 self.impls[name] = impl.load
                 return impl.load()
-            else:
-                from mako import exceptions
-                raise exceptions.RuntimeException(
-                        "Can't load plugin %s %s" %
-                        (self.group, name))
+
+        from mako import exceptions
+
+        raise exceptions.RuntimeException(
+            "Can't load plugin %s %s" % (self.group, name)
+        )
 
     def register(self, name, modulepath, objname):
         def load():
@@ -44,20 +46,23 @@ class PluginLoader(object):
             for token in modulepath.split(".")[1:]:
                 mod = getattr(mod, token)
             return getattr(mod, objname)
+
         self.impls[name] = load
 
-def verify_directory(dir):
+
+def verify_directory(dir_):
     """create and/or verify a filesystem directory."""
 
     tries = 0
 
-    while not os.path.exists(dir):
+    while not os.path.exists(dir_):
         try:
             tries += 1
-            os.makedirs(dir, compat.octal("0775"))
+            os.makedirs(dir_, 0o755)
         except:
             if tries > 5:
                 raise
+
 
 def to_list(x, default=None):
     if x is None:
@@ -68,8 +73,10 @@ def to_list(x, default=None):
         return x
 
 
-class memoized_property(object):
+class memoized_property:
+
     """A read-only @property that is only evaluated once."""
+
     def __init__(self, fget, doc=None):
         self.fget = fget
         self.__doc__ = doc or fget.__doc__
@@ -81,7 +88,9 @@ class memoized_property(object):
         obj.__dict__[self.__name__] = result = self.fget(obj)
         return result
 
-class memoized_instancemethod(object):
+
+class memoized_instancemethod:
+
     """Decorate a method memoize its return value.
 
     Best applied to no-arg methods: memoization is not sensitive to
@@ -89,6 +98,7 @@ class memoized_instancemethod(object):
     called with different arguments.
 
     """
+
     def __init__(self, fget, doc=None):
         self.fget = fget
         self.__doc__ = doc or fget.__doc__
@@ -97,19 +107,27 @@ class memoized_instancemethod(object):
     def __get__(self, obj, cls):
         if obj is None:
             return self
+
         def oneshot(*args, **kw):
             result = self.fget(obj, *args, **kw)
-            memo = lambda *a, **kw: result
+
+            def memo(*a, **kw):
+                return result
+
             memo.__name__ = self.__name__
             memo.__doc__ = self.__doc__
             obj.__dict__[self.__name__] = memo
             return result
+
         oneshot.__name__ = self.__name__
         oneshot.__doc__ = self.__doc__
         return oneshot
 
+
 class SetLikeDict(dict):
+
     """a dictionary that has some setlike methods on it"""
+
     def union(self, other):
         """produce a 'union' of this dict and another (at the key level).
 
@@ -118,18 +136,16 @@ class SetLikeDict(dict):
         x.update(other)
         return x
 
-class FastEncodingBuffer(object):
-    """a very rudimentary buffer that is faster than StringIO,
-    but doesn't crash on unicode data like cStringIO."""
 
-    def __init__(self, encoding=None, errors='strict', as_unicode=False):
+class FastEncodingBuffer:
+
+    """a very rudimentary buffer that is faster than StringIO,
+    and supports unicode data."""
+
+    def __init__(self, encoding=None, errors="strict"):
         self.data = collections.deque()
         self.encoding = encoding
-        if as_unicode:
-            self.delim = compat.u('')
-        else:
-            self.delim = ''
-        self.as_unicode = as_unicode
+        self.delim = ""
         self.errors = errors
         self.write = self.data.append
 
@@ -139,12 +155,15 @@ class FastEncodingBuffer(object):
 
     def getvalue(self):
         if self.encoding:
-            return self.delim.join(self.data).encode(self.encoding,
-                                                     self.errors)
+            return self.delim.join(self.data).encode(
+                self.encoding, self.errors
+            )
         else:
             return self.delim.join(self.data)
 
+
 class LRUCache(dict):
+
     """A dictionary-like object that stores a limited number of items,
     discarding lesser used items periodically.
 
@@ -153,21 +172,22 @@ class LRUCache(dict):
     is inexact.
     """
 
-    class _Item(object):
+    class _Item:
         def __init__(self, key, value):
             self.key = key
             self.value = value
-            self.timestamp = compat.time_func()
+            self.timestamp = timeit.default_timer()
+
         def __repr__(self):
             return repr(self.value)
 
-    def __init__(self, capacity, threshold=.5):
+    def __init__(self, capacity, threshold=0.5):
         self.capacity = capacity
         self.threshold = threshold
 
     def __getitem__(self, key):
         item = dict.__getitem__(self, key)
-        item.timestamp = compat.time_func()
+        item.timestamp = timeit.default_timer()
         return item.value
 
     def values(self):
@@ -176,9 +196,8 @@ class LRUCache(dict):
     def setdefault(self, key, value):
         if key in self:
             return self[key]
-        else:
-            self[key] = value
-            return value
+        self[key] = value
+        return value
 
     def __setitem__(self, key, value):
         item = dict.get(self, key)
@@ -191,9 +210,12 @@ class LRUCache(dict):
 
     def _manage_size(self):
         while len(self) > self.capacity + self.capacity * self.threshold:
-            bytime = sorted(dict.values(self),
-                            key=operator.attrgetter('timestamp'), reverse=True)
-            for item in bytime[self.capacity:]:
+            bytime = sorted(
+                dict.values(self),
+                key=operator.attrgetter("timestamp"),
+                reverse=True,
+            )
+            for item in bytime[self.capacity :]:
                 try:
                     del self[item.key]
                 except KeyError:
@@ -201,10 +223,12 @@ class LRUCache(dict):
                     # broke in on us. loop around and try again
                     break
 
+
 # Regexp to match python magic encoding line
 _PYTHON_MAGIC_COMMENT_re = re.compile(
-    r'[ \t\f]* \# .* coding[=:][ \t]*([-\w.]+)',
-    re.VERBOSE)
+    r"[ \t\f]* \# .* coding[=:][ \t]*([-\w.]+)", re.VERBOSE
+)
+
 
 def parse_encoding(fp):
     """Deduce the encoding of a Python source file (binary mode) from magic
@@ -222,13 +246,12 @@ def parse_encoding(fp):
         line1 = fp.readline()
         has_bom = line1.startswith(codecs.BOM_UTF8)
         if has_bom:
-            line1 = line1[len(codecs.BOM_UTF8):]
+            line1 = line1[len(codecs.BOM_UTF8) :]
 
-        m = _PYTHON_MAGIC_COMMENT_re.match(line1.decode('ascii', 'ignore'))
+        m = _PYTHON_MAGIC_COMMENT_re.match(line1.decode("ascii", "ignore"))
         if not m:
             try:
-                import parser
-                parser.suite(line1.decode('ascii', 'ignore'))
+                parse(line1.decode("ascii", "ignore"))
             except (ImportError, SyntaxError):
                 # Either it's a real syntax error, in which case the source
                 # is not valid python source, or line2 is a continuation of
@@ -238,19 +261,23 @@ def parse_encoding(fp):
             else:
                 line2 = fp.readline()
                 m = _PYTHON_MAGIC_COMMENT_re.match(
-                                               line2.decode('ascii', 'ignore'))
+                    line2.decode("ascii", "ignore")
+                )
 
         if has_bom:
             if m:
-                raise SyntaxError("python refuses to compile code with both a UTF8" \
-                      " byte-order-mark and a magic encoding comment")
-            return 'utf_8'
+                raise SyntaxError(
+                    "python refuses to compile code with both a UTF8"
+                    " byte-order-mark and a magic encoding comment"
+                )
+            return "utf_8"
         elif m:
             return m.group(1)
         else:
             return None
     finally:
         fp.seek(pos)
+
 
 def sorted_dict_repr(d):
     """repr() a dictionary with the keys in order.
@@ -260,18 +287,20 @@ def sorted_dict_repr(d):
     """
     keys = list(d.keys())
     keys.sort()
-    return "{" + ", ".join(["%r: %r" % (k, d[k]) for k in keys]) + "}"
+    return "{" + ", ".join("%r: %r" % (k, d[k]) for k in keys) + "}"
+
 
 def restore__ast(_ast):
     """Attempt to restore the required classes to the _ast module if it
     appears to be missing them
     """
-    if hasattr(_ast, 'AST'):
+    if hasattr(_ast, "AST"):
         return
     _ast.PyCF_ONLY_AST = 2 << 9
-    m = compile("""\
+    m = compile(
+        """\
 def foo(): pass
-class Bar(object): pass
+class Bar: pass
 if False: pass
 baz = 'mako'
 1 + 2 - 3 * 4 / 5
@@ -282,13 +311,17 @@ baz = 'mako'
 baz and 'foo' or 'bar'
 (mako is baz == baz) is not baz != mako
 mako > baz < mako >= baz <= mako
-mako in baz not in mako""", '<unknown>', 'exec', _ast.PyCF_ONLY_AST)
+mako in baz not in mako""",
+        "<unknown>",
+        "exec",
+        _ast.PyCF_ONLY_AST,
+    )
     _ast.Module = type(m)
 
     for cls in _ast.Module.__mro__:
-        if cls.__name__ == 'mod':
+        if cls.__name__ == "mod":
             _ast.mod = cls
-        elif cls.__name__ == 'AST':
+        elif cls.__name__ == "AST":
             _ast.AST = cls
 
     _ast.FunctionDef = type(m.body[0])
@@ -338,14 +371,10 @@ mako in baz not in mako""", '<unknown>', 'exec', _ast.PyCF_ONLY_AST)
     _ast.NotIn = type(m.body[12].value.ops[1])
 
 
+def read_file(path, mode="rb"):
+    with open(path, mode) as fp:
+        return fp.read()
 
-def read_file(path, mode='rb'):
-    fp = open(path, mode)
-    try:
-        data = fp.read()
-        return data
-    finally:
-        fp.close()
 
 def read_python_file(path):
     fp = open(path, "rb")
@@ -357,4 +386,3 @@ def read_python_file(path):
         return data
     finally:
         fp.close()
-

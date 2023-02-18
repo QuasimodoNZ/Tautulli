@@ -1,3 +1,5 @@
+# -*- coding: utf-8 -*-
+
 #  This file is part of Tautulli.
 #
 #  Tautulli is free software: you can redistribute it and/or modify
@@ -14,40 +16,51 @@
 #  along with Tautulli.  If not, see <http://www.gnu.org/licenses/>.
 
 
-# http://tools.cherrypy.org/wiki/AuthenticationAndAccessRestrictions
+# https://github.com/cherrypy/tools/blob/master/AuthenticationAndAccessRestrictions
 # Form based authentication for CherryPy. Requires the
 # Session tool to be loaded.
 
+from future.builtins import object
+
 from datetime import datetime, timedelta
-from urllib import quote, unquote
+from future.moves.urllib.parse import quote, unquote
 
 import cherrypy
 from hashing_passwords import check_hash
 import jwt
 
 import plexpy
-import logger
-from plexpy.database import MonitorDatabase
-from plexpy.users import Users, refresh_users
-from plexpy.plextv import PlexTV
+if plexpy.PYTHON2:
+    import logger
+    from database import MonitorDatabase
+    from helpers import timestamp
+    from users import Users, refresh_users
+    from plextv import PlexTV
+else:
+    from plexpy import logger
+    from plexpy.database import MonitorDatabase
+    from plexpy.helpers import timestamp
+    from plexpy.users import Users, refresh_users
+    from plexpy.plextv import PlexTV
 
+# Monkey patch SameSite support into cookies.
+# https://stackoverflow.com/a/50813092
+try:
+    from http.cookies import Morsel
+except ImportError:
+    from Cookie import Morsel
+Morsel._reserved[str('samesite')] = str('SameSite')
 
 JWT_ALGORITHM = 'HS256'
 JWT_COOKIE_NAME = 'tautulli_token_'
 
 
-def plex_user_login(username=None, password=None, token=None, headers=None):
+def plex_user_login(token=None, headers=None):
     user_token = None
     user_id = None
 
     # Try to login to Plex.tv to check if the user has a vaild account
-    if username and password:
-        plex_tv = PlexTV(username=username, password=password, headers=headers)
-        plex_user = plex_tv.get_token()
-        if plex_user:
-            user_token = plex_user['auth_token']
-            user_id = plex_user['user_id']
-    elif token:
+    if token:
         plex_tv = PlexTV(token=token, headers=headers)
         plex_user = plex_tv.get_plex_account_details()
         if plex_user:
@@ -84,7 +97,7 @@ def plex_user_login(username=None, password=None, token=None, headers=None):
             # Register the new user / update the access tokens.
             monitor_db = MonitorDatabase()
             try:
-                logger.debug(u"Tautulli WebAuth :: Registering token for user '%s' in the database."
+                logger.debug("Tautulli WebAuth :: Registering token for user '%s' in the database."
                              % user_details['username'])
                 result = monitor_db.action('UPDATE users SET server_token = ? WHERE user_id = ?',
                                            [server_token, user_details['user_id']])
@@ -95,23 +108,20 @@ def plex_user_login(username=None, password=None, token=None, headers=None):
                     # Successful login
                     return user_details, 'guest'
                 else:
-                    logger.warn(u"Tautulli WebAuth :: Unable to register user '%s' in database."
+                    logger.warn("Tautulli WebAuth :: Unable to register user '%s' in database."
                                 % user_details['username'])
                     return None
             except Exception as e:
-                logger.warn(u"Tautulli WebAuth :: Unable to register user '%s' in database: %s."
+                logger.warn("Tautulli WebAuth :: Unable to register user '%s' in database: %s."
                             % (user_details['username'], e))
                 return None
         else:
-            logger.warn(u"Tautulli WebAuth :: Unable to retrieve Plex.tv server token for user '%s'."
+            logger.warn("Tautulli WebAuth :: Unable to retrieve Plex.tv server token for user '%s'."
                         % user_details['username'])
             return None
-    elif username:
-        logger.warn(u"Tautulli WebAuth :: Unable to retrieve Plex.tv user token for user '%s'." % username)
-        return None
 
     elif token:
-        logger.warn(u"Tautulli WebAuth :: Unable to retrieve Plex.tv user token for Plex OAuth.")
+        logger.warn("Tautulli WebAuth :: Unable to retrieve Plex.tv user token for Plex OAuth.")
         return None
 
 
@@ -122,32 +132,37 @@ def check_credentials(username=None, password=None, token=None, admin_login='0',
     if username and password:
         if plexpy.CONFIG.HTTP_PASSWORD:
             user_details = {'user_id': None, 'username': username}
-
-            if plexpy.CONFIG.HTTP_HASHED_PASSWORD and \
-                    username == plexpy.CONFIG.HTTP_USERNAME and check_hash(password, plexpy.CONFIG.HTTP_PASSWORD):
-                return True, user_details, 'admin'
-            elif not plexpy.CONFIG.HTTP_HASHED_PASSWORD and \
-                    username == plexpy.CONFIG.HTTP_USERNAME and password == plexpy.CONFIG.HTTP_PASSWORD:
+            if username == plexpy.CONFIG.HTTP_USERNAME and check_hash(password, plexpy.CONFIG.HTTP_PASSWORD):
                 return True, user_details, 'admin'
 
     if plexpy.CONFIG.HTTP_PLEX_ADMIN or (not admin_login == '1' and plexpy.CONFIG.ALLOW_GUEST_ACCESS):
-        plex_login = plex_user_login(username=username, password=password, token=token, headers=headers)
+        plex_login = plex_user_login(token=token, headers=headers)
         if plex_login is not None:
             return True, plex_login[0], plex_login[1]
 
     return False, None, None
 
 
-def check_jwt_token():
-    jwt_cookie = JWT_COOKIE_NAME + plexpy.CONFIG.PMS_UUID
+def get_jwt_token():
+    jwt_cookie = str(JWT_COOKIE_NAME + plexpy.CONFIG.PMS_UUID)
     jwt_token = cherrypy.request.cookie.get(jwt_cookie)
+
+    if jwt_token:
+        return jwt_token.value
+
+
+def check_jwt_token():
+    jwt_token = get_jwt_token()
 
     if jwt_token:
         try:
             payload = jwt.decode(
-                jwt_token.value, plexpy.CONFIG.JWT_SECRET, leeway=timedelta(seconds=10), algorithms=[JWT_ALGORITHM]
+                jwt_token, plexpy.CONFIG.JWT_SECRET, leeway=timedelta(seconds=10), algorithms=[JWT_ALGORITHM]
             )
         except (jwt.DecodeError, jwt.ExpiredSignatureError):
+            return None
+
+        if not Users().get_user_login(jwt_token=jwt_token):
             return None
 
         return payload
@@ -229,6 +244,33 @@ def all_of(*conditions):
     return check
 
 
+def check_rate_limit(ip_address):
+    monitor_db = MonitorDatabase()
+    result = monitor_db.select('SELECT timestamp, success FROM user_login '
+                               'WHERE ip_address = ? '
+                               'AND timestamp >= ( '
+                               'SELECT CASE WHEN MAX(timestamp) IS NULL THEN 0 ELSE MAX(timestamp) END '
+                               'FROM user_login WHERE ip_address = ? AND success = 1) '
+                               'ORDER BY timestamp DESC',
+                               [ip_address, ip_address])
+
+    try:
+        last_timestamp = result[0]['timestamp']
+    except IndexError:
+        last_timestamp = 0
+
+    try:
+        last_success = max(login['timestamp'] for login in result if login['success'])
+    except ValueError:
+        last_success = 0
+
+    max_timestamp = max(last_success, last_timestamp - plexpy.CONFIG.HTTP_RATE_LIMIT_ATTEMPTS_INTERVAL)
+    attempts = [login for login in result if login['timestamp'] >= max_timestamp and not login['success']]
+
+    if len(attempts) >= plexpy.CONFIG.HTTP_RATE_LIMIT_ATTEMPTS:
+        return max(last_timestamp - (timestamp() - plexpy.CONFIG.HTTP_RATE_LIMIT_LOCKOUT_TIME), 0)
+
+
 # Controller to provide login and logout actions
 
 class AuthController(object):
@@ -238,7 +280,8 @@ class AuthController(object):
             return
         raise cherrypy.HTTPRedirect(plexpy.HTTP_ROOT)
 
-    def on_login(self, username=None, user_id=None, user_group=None, success=False, oauth=False):
+    def on_login(self, username=None, user_id=None, user_group=None, success=False, oauth=False,
+                 expiry=None, jwt_token=None):
         """Called on successful login"""
 
         # Save login to the database
@@ -252,21 +295,27 @@ class AuthController(object):
                                ip_address=ip_address,
                                host=host,
                                user_agent=user_agent,
-                               success=success)
+                               success=success,
+                               expiry=expiry,
+                               jwt_token=jwt_token)
 
         if success:
             use_oauth = 'Plex OAuth' if oauth else 'form'
-            logger.debug(u"Tautulli WebAuth :: %s user '%s' logged into Tautulli using %s login."
+            logger.debug("Tautulli WebAuth :: %s user '%s' logged into Tautulli using %s login."
                          % (user_group.capitalize(), username, use_oauth))
-    
-    def on_logout(self, username, user_group):
+
+    def on_logout(self, username, user_group, jwt_token=None):
         """Called on logout"""
-        logger.debug(u"Tautulli WebAuth :: %s user '%s' logged out of Tautulli." % (user_group.capitalize(), username))
-    
+        jwt_token = get_jwt_token()
+        if jwt_token:
+            Users().clear_user_login_token(jwt_token=jwt_token)
+
+        logger.debug("Tautulli WebAuth :: %s user '%s' logged out of Tautulli." % (user_group.capitalize(), username))
+
     def get_loginform(self, redirect_uri=''):
         from plexpy.webserve import serve_template
         return serve_template(templatename="login.html", title="Login", redirect_uri=unquote(redirect_uri))
-    
+
     @cherrypy.expose
     def index(self, *args, **kwargs):
         raise cherrypy.HTTPRedirect(plexpy.HTTP_ROOT + "auth/login")
@@ -283,12 +332,17 @@ class AuthController(object):
 
         payload = check_jwt_token()
         if payload:
-            self.on_logout(payload['user'], payload['user_group'])
+            self.on_logout(username=payload['user'],
+                           user_group=payload['user_group'])
 
-        jwt_cookie = JWT_COOKIE_NAME + plexpy.CONFIG.PMS_UUID
-        cherrypy.response.cookie[jwt_cookie] = 'expire'
+        jwt_cookie = str(JWT_COOKIE_NAME + plexpy.CONFIG.PMS_UUID)
+        cherrypy.response.cookie[jwt_cookie] = ''
         cherrypy.response.cookie[jwt_cookie]['expires'] = 0
-        cherrypy.response.cookie[jwt_cookie]['path'] = '/'
+        cherrypy.response.cookie[jwt_cookie]['path'] = plexpy.HTTP_ROOT.rstrip('/') or '/'
+
+        if plexpy.HTTP_ROOT != '/':
+            # Also expire the JWT on the root path
+            cherrypy.response.headers['Set-Cookie'] = jwt_cookie + '=""; expires=Thu, 01 Jan 1970 12:00:00 GMT; path=/'
 
         cherrypy.request.login = None
 
@@ -303,6 +357,16 @@ class AuthController(object):
         if cherrypy.request.method != 'POST':
             cherrypy.response.status = 405
             return {'status': 'error', 'message': 'Sign in using POST.'}
+
+        ip_address = cherrypy.request.remote.ip
+        rate_limit = check_rate_limit(ip_address)
+
+        if rate_limit:
+            logger.debug("Tautulli WebAuth :: Too many incorrect login attempts from '%s'." % ip_address)
+            error_message = {'status': 'error', 'message': 'Too many login attempts.'}
+            cherrypy.response.status = 429
+            cherrypy.response.headers['Retry-After'] = rate_limit
+            return error_message
 
         error_message = {'status': 'error', 'message': 'Invalid credentials.'}
 
@@ -329,31 +393,42 @@ class AuthController(object):
                           user_id=user_details['user_id'],
                           user_group=user_group,
                           success=True,
-                          oauth=bool(token))
+                          oauth=bool(token),
+                          expiry=expiry,
+                          jwt_token=jwt_token)
 
-            jwt_cookie = JWT_COOKIE_NAME + plexpy.CONFIG.PMS_UUID
+            jwt_cookie = str(JWT_COOKIE_NAME + plexpy.CONFIG.PMS_UUID)
             cherrypy.response.cookie[jwt_cookie] = jwt_token
             cherrypy.response.cookie[jwt_cookie]['expires'] = int(time_delta.total_seconds())
-            cherrypy.response.cookie[jwt_cookie]['path'] = '/'
+            cherrypy.response.cookie[jwt_cookie]['path'] = plexpy.HTTP_ROOT.rstrip('/') or '/'
+            cherrypy.response.cookie[jwt_cookie]['httponly'] = True
+            cherrypy.response.cookie[jwt_cookie]['samesite'] = 'lax'
 
             cherrypy.request.login = payload
             cherrypy.response.status = 200
-            return {'status': 'success', 'token': jwt_token.decode('utf-8'), 'uuid': plexpy.CONFIG.PMS_UUID}
+            return {'status': 'success', 'token': jwt_token, 'uuid': plexpy.CONFIG.PMS_UUID}
 
         elif admin_login == '1' and username:
             self.on_login(username=username)
-            logger.debug(u"Tautulli WebAuth :: Invalid admin login attempt from '%s'." % username)
+            logger.debug("Tautulli WebAuth :: Invalid admin login attempt from '%s'." % username)
             cherrypy.response.status = 401
             return error_message
 
         elif username:
             self.on_login(username=username)
-            logger.debug(u"Tautulli WebAuth :: Invalid user login attempt from '%s'." % username)
+            logger.debug("Tautulli WebAuth :: Invalid user login attempt from '%s'." % username)
             cherrypy.response.status = 401
             return error_message
 
         elif token:
             self.on_login(username='Plex OAuth', oauth=True)
-            logger.debug(u"Tautulli WebAuth :: Invalid Plex OAuth login attempt.")
+            logger.debug("Tautulli WebAuth :: Invalid Plex OAuth login attempt.")
             cherrypy.response.status = 401
             return error_message
+
+    @cherrypy.expose
+    def redirect(self, redirect_uri='', *args, **kwargs):
+        root = plexpy.HTTP_ROOT.rstrip('/')
+        if redirect_uri.startswith(root):
+            redirect_uri = redirect_uri[len(root):]
+        raise cherrypy.HTTPRedirect(plexpy.HTTP_ROOT + redirect_uri.strip('/'))

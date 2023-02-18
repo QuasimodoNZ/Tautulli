@@ -10,10 +10,23 @@ DOCUMENTATION :: END
 </%doc>
 
 <ul class="stacked-configs list-unstyled">
-    % for device in sorted(devices_list, key=lambda k: k['device_name']):
+    % for device in sorted(devices_list, key=lambda k: ((k['friendly_name'] or k['device_name']).lower(), k['id'])):
     <li class="mobile-device pointer" data-id="${device['id']}" data-name="${device['device_name']}">
         <span>
-            <span class="toggle-left"><i class="fa fa-lg fa-fw fa-mobile"></i></span>
+            % if device['official'] == -1:
+                <span class="toggle-left official-tooltip" data-toggle="tooltip" data-placement="top" title="OneSignal Validation Failed"><i class="fa fa-lg fa-fw fa-exclamation-triangle"></i></span>
+            % elif device['official'] > 0:
+                <%
+                    icon = 'mobile'
+                    if device['platform'] == 'android':
+                        icon = 'android'
+                    elif device['platform'] == 'ios':
+                        icon = 'apple'
+                %>
+                <span class="toggle-left"><i class="fa fa-lg fa-fw fa-${icon}"></i></span>
+            % else:
+                <span class="toggle-left official-tooltip" data-toggle="tooltip" data-placement="top" title="Unofficial or Unknown App"><i class="fa fa-lg fa-fw fa-exclamation-triangle"></i></span>
+            % endif
             ${device['friendly_name'] or device['device_name']} &nbsp;<span class="friendly_name">(${device['id']})</span>
             <span class="toggle-right"><i class="fa fa-lg fa-fw fa-cog"></i></span>
             <span class="toggle-right friendly_name" id="device-last_seen-${device['id']}">
@@ -45,7 +58,7 @@ DOCUMENTATION :: END
 
     getPlexPyURL = function () {
         var deferred = $.Deferred();
-        if (location.hostname !== "localhost" && location.hostname !== "127.0.0.1") {
+        if (location.hostname !== "localhost" && location.hostname !== "127.0.0.1" && location.hostname !== "[::1]") {
             deferred.resolve(location.href.split('/settings')[0]);
         } else {
             $.get('get_plexpy_url').then(function (url) {
@@ -61,7 +74,7 @@ DOCUMENTATION :: END
         var hostname = parser.hostname;
         var protocol = parser.protocol;
 
-        if (hostname === '127.0.0.1' || hostname === 'localhost') {
+        if (hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '[::1]') {
             $('#api_qr_localhost').toggle(true);
             $('#api_qr_private').toggle(false);
         } else {
@@ -75,6 +88,17 @@ DOCUMENTATION :: END
         $('#api_qr_https').toggle((protocol === 'http:'));
     }
 
+    function generateQRCode(url) {
+        $('#api_qr_code').empty().kjua({
+            text: url + '|' + $('#api_qr_token').val(),
+            render: 'canvas',
+            ecLevel: 'H',
+            size: 256,
+            fill: '#000',
+            back: '#eee'
+        });
+    }
+
     var verifiedDevice = false;
     $('#register-mobile-device').click(function () {
         verifiedDevice = false;
@@ -85,16 +109,16 @@ DOCUMENTATION :: END
             $.get('generate_api_key', { device: true }).then(function (token) {
                 $('#api_qr_address').val(url);
                 $('#api_qr_token').val(token);
-                $('#api_qr_code').empty().qrcode({
-                    text: url + '|' + token
-                });
+                generateQRCode(url);
 
                 (function poll() {
                     setTimeout(function () {
                         $.ajax({
                             url: 'verify_mobile_device',
                             type: 'GET',
-                            data: { device_token: token },
+                            data: {
+                                device_token: token
+                            },
                             success: function (data) {
                                 if (data.result === 'success') {
                                     verifiedDevice = true;
@@ -117,12 +141,10 @@ DOCUMENTATION :: END
     });
 
     $('#api_qr_address').change(function () {
+        this.value = $.trim(this.value);
         var url = $(this).val();
         checkQRAddress(url);
-
-        $('#api_qr_code').empty().qrcode({
-            text: url + '|' + $('#api_qr_token').val()
-        });
+        generateQRCode(url);
     });
 
     $('#api-qr-modal').on('hide.bs.modal', function () {
@@ -130,7 +152,10 @@ DOCUMENTATION :: END
             $.ajax({
                 url: 'verify_mobile_device',
                 type: 'GET',
-                data: { cancel: true },
+                data: {
+                    device_token: $('#api_qr_token').val(),
+                    cancel: true
+                },
                 success: function (data) {
                     showMsg('<i class="fa fa-times"></i> ' + data.message, false, true, 5000, false);
                 }
@@ -138,4 +163,6 @@ DOCUMENTATION :: END
         }
         verifiedDevice = true;
     })
+
+    $('.official-tooltip').tooltip();
 </script>

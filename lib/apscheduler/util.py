@@ -1,12 +1,15 @@
 """This module contains several handy functions primarily meant for internal use."""
 
 from __future__ import division
+
 from datetime import date, datetime, time, timedelta, tzinfo
 from calendar import timegm
-import re
 from functools import partial
+from inspect import isclass, ismethod
+import re
+import sys
 
-from pytz import timezone, utc
+from pytz import timezone, utc, FixedOffset
 import six
 
 try:
@@ -19,9 +22,19 @@ try:
 except ImportError:
     TIMEOUT_MAX = 4294967  # Maximum value accepted by Event.wait() on Windows
 
+try:
+    from asyncio import iscoroutinefunction
+except ImportError:
+    try:
+        from trollius import iscoroutinefunction
+    except ImportError:
+        def iscoroutinefunction(func):
+            return False
+
 __all__ = ('asint', 'asbool', 'astimezone', 'convert_to_datetime', 'datetime_to_utc_timestamp',
            'utc_timestamp_to_datetime', 'timedelta_seconds', 'datetime_ceil', 'get_callable_name',
-           'obj_to_ref', 'ref_to_obj', 'maybe_ref', 'repr_escape', 'check_callable_args')
+           'obj_to_ref', 'ref_to_obj', 'maybe_ref', 'repr_escape', 'check_callable_args',
+           'normalize', 'localize', 'TIMEOUT_MAX')
 
 
 class _Undefined(object):
@@ -77,9 +90,7 @@ def astimezone(obj):
     if isinstance(obj, six.string_types):
         return timezone(obj)
     if isinstance(obj, tzinfo):
-        if not hasattr(obj, 'localize') or not hasattr(obj, 'normalize'):
-            raise TypeError('Only timezones from the pytz library are supported')
-        if obj.zone == 'local':
+        if obj.tzname(None) == 'local':
             raise ValueError(
                 'Unable to determine the name of the local timezone -- you must explicitly '
                 'specify the name of the local timezone. Please refrain from using timezones like '
@@ -92,8 +103,9 @@ def astimezone(obj):
 
 _DATE_REGEX = re.compile(
     r'(?P<year>\d{4})-(?P<month>\d{1,2})-(?P<day>\d{1,2})'
-    r'(?: (?P<hour>\d{1,2}):(?P<minute>\d{1,2}):(?P<second>\d{1,2})'
-    r'(?:\.(?P<microsecond>\d{1,6}))?)?')
+    r'(?:[ T](?P<hour>\d{1,2}):(?P<minute>\d{1,2}):(?P<second>\d{1,2})'
+    r'(?:\.(?P<microsecond>\d{1,6}))?'
+    r'(?P<timezone>Z|[+-]\d\d:\d\d)?)?$')
 
 
 def convert_to_datetime(input, tz, arg_name):
@@ -105,7 +117,9 @@ def convert_to_datetime(input, tz, arg_name):
     If the input is a string, it is parsed as a datetime with the given timezone.
 
     Date strings are accepted in three different forms: date only (Y-m-d), date with time
-    (Y-m-d H:M:S) or with date+time with microseconds (Y-m-d H:M:S.micro).
+    (Y-m-d H:M:S) or with date+time with microseconds (Y-m-d H:M:S.micro). Additionally you can
+    override the time zone by giving a specific offset in the format specified by ISO 8601:
+    Z (UTC), +HH:MM or -HH:MM.
 
     :param str|datetime input: the datetime or string to convert to a timezone aware datetime
     :param datetime.tzinfo tz: timezone to interpret ``input`` in
@@ -123,8 +137,17 @@ def convert_to_datetime(input, tz, arg_name):
         m = _DATE_REGEX.match(input)
         if not m:
             raise ValueError('Invalid date string')
-        values = [(k, int(v or 0)) for k, v in m.groupdict().items()]
-        values = dict(values)
+
+        values = m.groupdict()
+        tzname = values.pop('timezone')
+        if tzname == 'Z':
+            tz = utc
+        elif tzname:
+            hours, minutes = (int(x) for x in tzname[1:].split(':'))
+            sign = 1 if tzname[0] == '+' else -1
+            tz = FixedOffset(sign * (hours * 60 + minutes))
+
+        values = {k: int(v or 0) for k, v in values.items()}
         datetime_ = datetime(**values)
     else:
         raise TypeError('Unsupported type for %s: %s' % (arg_name, input.__class__.__name__))
@@ -137,11 +160,7 @@ def convert_to_datetime(input, tz, arg_name):
     if isinstance(tz, six.string_types):
         tz = timezone(tz)
 
-    try:
-        return tz.localize(datetime_, is_dst=None)
-    except AttributeError:
-        raise TypeError(
-            'Only pytz timezones are supported (need the localize() and normalize() methods)')
+    return localize(datetime_, tz)
 
 
 def datetime_to_utc_timestamp(timeval):
@@ -210,7 +229,7 @@ def get_callable_name(func):
     # class methods, bound and unbound methods
     f_self = getattr(func, '__self__', None) or getattr(func, 'im_self', None)
     if f_self and hasattr(func, '__name__'):
-        f_class = f_self if isinstance(f_self, type) else f_self.__class__
+        f_class = f_self if isclass(f_self) else f_self.__class__
     else:
         f_class = getattr(func, 'im_class', None)
 
@@ -248,7 +267,18 @@ def obj_to_ref(obj):
     if '<locals>' in name:
         raise ValueError('Cannot create a reference to a nested function')
 
-    return '%s:%s' % (obj.__module__, name)
+    if ismethod(obj):
+        if hasattr(obj, 'im_self') and obj.im_self:
+            # bound method
+            module = obj.im_self.__module__
+        elif hasattr(obj, 'im_class') and obj.im_class:
+            # unbound method
+            module = obj.im_class.__module__
+        else:
+            module = obj.__module__
+    else:
+        module = obj.__module__
+    return '%s:%s' % (module, name)
 
 
 def ref_to_obj(ref):
@@ -317,7 +347,10 @@ def check_callable_args(func, args, kwargs):
     has_varargs = has_var_kwargs = False
 
     try:
-        sig = signature(func)
+        if sys.version_info >= (3, 5):
+            sig = signature(func, follow_wrapped=False)
+        else:
+            sig = signature(func)
     except ValueError:
         # signature() doesn't work against every kind of callable
         return
@@ -383,3 +416,23 @@ def check_callable_args(func, args, kwargs):
         raise ValueError(
             'The target callable does not accept the following keyword arguments: %s' %
             ', '.join(unmatched_kwargs))
+
+
+def iscoroutinefunction_partial(f):
+    while isinstance(f, partial):
+        f = f.func
+
+    # The asyncio version of iscoroutinefunction includes testing for @coroutine
+    # decorations vs. the inspect version which does not.
+    return iscoroutinefunction(f)
+
+
+def normalize(dt):
+    return datetime.fromtimestamp(dt.timestamp(), dt.tzinfo)
+
+
+def localize(dt, tzinfo):
+    if hasattr(tzinfo, 'localize'):
+        return tzinfo.localize(dt)
+
+    return normalize(dt.replace(tzinfo=tzinfo))

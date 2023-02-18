@@ -50,24 +50,25 @@
                                         </div>
                                         <p class="help-block">
                                             <span id="simple_cron_message">Set the schedule for the newsletter.</span>
-                                            <span id="custom_cron_message">Set the schedule for the newsletter using a <a href="${anon_url('https://crontab.guru')}" target="_blank">custom crontab</a>. Only standard cron values are valid.</span>
+                                            <span id="custom_cron_message">Set the schedule for the newsletter using a <a href="${anon_url('https://crontab.guru')}" target="_blank" rel="noreferrer">custom crontab</a>. Only standard cron values are valid.</span>
                                         </p>
                                     </div>
                                     <div class="form-group">
                                         <label for="time_frame">Time Frame</label>
                                         <div class="row">
-                                            <div class="col-md-4">
+                                            <div class="col-md-5">
                                                 <div class="input-group newsletter-time_frame">
                                                     <span class="input-group-addon form-control btn-dark inactive">Last</span>
                                                     <input type="number" class="form-control" id="newsletter_config_time_frame" name="newsletter_config_time_frame" value="${newsletter['config']['time_frame']}">
                                                     <select class="form-control" id="newsletter_config_time_frame_units" name="newsletter_config_time_frame_units">
+                                                        <option value="months" ${'selected' if newsletter['config']['time_frame_units'] == 'months' else ''}>months</option>
                                                         <option value="days" ${'selected' if newsletter['config']['time_frame_units'] == 'days' else ''}>days</option>
                                                         <option value="hours" ${'selected' if newsletter['config']['time_frame_units'] == 'hours' else ''}>hours</option>
                                                     </select>
                                                 </div>
                                             </div>
                                         </div>
-                                        <p class="help-block">Set the time frame to include in the newsletter. Note: Days uses calendar days (i.e. since midnight).</p>
+                                        <p class="help-block">Set the time frame to include in the newsletter.</p>
                                     </div>
                                 </div>
                                 <div class="col-md-12 modal-config-section">
@@ -123,7 +124,7 @@
                                         <div class="row">
                                             <div class="col-md-12">
                                                 <select class="form-control" id="${item['name']}" name="${item['name']}">
-                                                    % for key, value in sorted(item['select_options'].iteritems()):
+                                                    % for key, value in sorted(item['select_options'].items()):
                                                     % if key == item['value']:
                                                     <option value="${key}" selected>${value}</option>
                                                     % else:
@@ -144,7 +145,7 @@
                                                     <option value="select-all">Select All</option>
                                                     <option value="remove-all">Remove All</option>
                                                     % if isinstance(item['select_options'], dict):
-                                                    % for section, options in item['select_options'].iteritems():
+                                                    % for section, options in item['select_options'].items():
                                                     <optgroup label="${section}">
                                                         % for option in sorted(options, key=lambda x: x['text'].lower()):
                                                             <option value="${option['value']}">${option['text']}</option>
@@ -173,7 +174,11 @@
                                                 <input type="text" class="form-control" id="id_name" name="id_name" value="${newsletter['id_name']}" size="30">
                                             </div>
                                         </div>
-                                        <p class="help-block">Optional: Enter a unique ID name to create a static URL to the last sent scheduled newsletter at <span class="inline-pre">${http_root}newsletter/id/&lt;id_name&gt;</span>. Only letters (a-z), numbers (0-9), underscores (_) and hyphens (-) are allowed. Leave blank to disable.</p>
+                                        <p class="help-block">
+                                            Optional: Enter a unique ID name to create a static URL to the <em>last sent scheduled newsletter</em> at <span class="inline-pre">${http_root}newsletter/id/&lt;id_name&gt;</span>.
+                                            Only letters (a-z), numbers (0-9), underscores (_) and hyphens (-) are allowed. Leave blank to disable.<br>
+                                            Note: Test newsletters are not considered scheduled newsletters.
+                                        </p>
                                     </div>
                                     <div class="form-group">
                                         <label for="friendly_name">Description</label>
@@ -218,6 +223,13 @@
                                         <input type="hidden" id="newsletter_config_formatted" name="newsletter_config_formatted" value="${newsletter['config']['formatted']}">
                                     </div>
                                     <div class="form-group" id="email_notifier_select">
+                                        <div class="checkbox">
+                                            <label>
+                                                <input type="checkbox" id="newsletter_config_threaded_checkbox" data-id="newsletter_config_threaded" class="checkboxes" value="1" ${checked(newsletter['config']['threaded'])}> Enable Grouped Email Thread
+                                            </label>
+                                            <p class="help-block">Enable to group this newsletter together in a single Email thread. Disable to send a new Email for each newsletter.</p>
+                                            <input type="hidden" id="newsletter_config_threaded" name="newsletter_config_threaded" value="${newsletter['config']['threaded']}">
+                                        </div>
                                         <label for="newsletter_email_notifier_id">Email Notification Agent</label>
                                         <div class="row">
                                             <div class="col-md-12">
@@ -260,7 +272,7 @@
                                         </div>
                                         <p class="help-block">
                                             Select an existing notification agent where the subject and body text will be sent.<br>
-                                            Note: Self-hosted newsletters must be enabled under <a data-tab-destination="tabs-notifications" data-dismiss="modal" data-target="#newsletter_self_hosted">Newsletters</a> to include a link to the newsletter.
+                                            Note: Self-hosted newsletters must be enabled under <a data-tab-destination="notifications" data-dismiss="modal" data-target="newsletter_self_hosted">Newsletters</a> to include a link to the newsletter.
                                         </p>
                                     </div>
                                     <div id="newsletter-email-config">
@@ -314,11 +326,15 @@
                                             <div class="row">
                                                 <div class="col-md-12">
                                                     <select class="form-control" id="${item['name']}" name="${item['name']}">
-                                                        % for key, value in sorted(item['select_options'].iteritems()):
-                                                        % if key == item['value']:
-                                                        <option value="${key}" selected>${value}</option>
+                                                        % for key, value in sorted(item['select_options'].items()):
+                                                        % if isinstance(value, list):
+                                                        <optgroup label="${key}">
+                                                            % for option in sorted(value, key=lambda x: x['text'].lower()):
+                                                                <option value="${option['value']}" ${'selected' if option['value'] == item['value'] else ''}>${option['text']}</option>
+                                                            % endfor
+                                                        </optgroup>
                                                         % else:
-                                                        <option value="${key}">${value}</option>
+                                                        <option value="${key}" ${'selected' if key == item['value'] else ''}>${value}</option>
                                                         % endif
                                                         % endfor
                                                     </select>
@@ -335,7 +351,7 @@
                                                         <option value="select-all">Select All</option>
                                                         <option value="remove-all">Remove All</option>
                                                         % if isinstance(item['select_options'], dict):
-                                                        % for section, options in item['select_options'].iteritems():
+                                                        % for section, options in item['select_options'].items():
                                                         <optgroup label="${section}">
                                                             % for option in sorted(options, key=lambda x: x['text'].lower()):
                                                                 <option value="${option['value']}">${option['text']}</option>
@@ -573,6 +589,7 @@
     var $email_selectors = $('#newsletter_email_to, #newsletter_email_cc, #newsletter_email_bcc').selectize({
         plugins: ['remove_button'],
         maxItems: null,
+        searchField: ['text', 'value'],
         render: {
             item: function(item, escape) {
                 return '<div>' +
@@ -664,6 +681,7 @@
         }
 
         getNewslettersTable();
+        toggleRevealTokens();
     }
 
     function deleteCallback() {
@@ -707,6 +725,9 @@
 
     $('#duplicate-newsletter-item').click(function() {
         var msg = 'Are you sure you want to duplicate this <strong>${newsletter["agent_label"]}</strong> newsletter?';
+        if ($('#set_newsletter_config .form-control[id$=_password]').val()) {
+            msg += '<br><br>Note: Saved passwords will not be copied over and must be re-entered.';
+        }
         var url = 'add_newsletter_config';
         confirmAjaxCall(url, msg, { agent_id: '${newsletter["agent_id"]}' }, null, duplicateCallback);
     });
@@ -775,6 +796,8 @@
         };
         $(this).on('focus keyup input', function () { resizeTextarea(this); }).removeAttr('data-autoresize');
     });
+
+    toggleRevealTokens();
 </script>
 % else:
 <div class="modal-dialog" role="document">

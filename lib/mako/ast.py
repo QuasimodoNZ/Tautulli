@@ -1,5 +1,5 @@
 # mako/ast.py
-# Copyright (C) 2006-2015 the Mako authors and contributors <see AUTHORS file>
+# Copyright 2006-2022 the Mako authors and contributors <see AUTHORS file>
 #
 # This module is part of Mako and is released under
 # the MIT License: http://www.opensource.org/licenses/mit-license.php
@@ -7,11 +7,16 @@
 """utilities for analyzing expressions and blocks of Python
 code, as well as generating Python from AST nodes"""
 
-from mako import exceptions, pyparser, compat
 import re
 
-class PythonCode(object):
+from mako import exceptions
+from mako import pyparser
+
+
+class PythonCode:
+
     """represents information about a string containing Python code"""
+
     def __init__(self, code, **exception_kwargs):
         self.code = code
 
@@ -33,7 +38,7 @@ class PythonCode(object):
         # - AST is less likely to break with version changes
         # (for example, the behavior of co_names changed a little bit
         # in python version 2.5)
-        if isinstance(code, compat.string_types):
+        if isinstance(code, str):
             expr = pyparser.parse(code.lstrip(), "exec", **exception_kwargs)
         else:
             expr = code
@@ -41,18 +46,21 @@ class PythonCode(object):
         f = pyparser.FindIdentifiers(self, **exception_kwargs)
         f.visit(expr)
 
-class ArgumentList(object):
+
+class ArgumentList:
+
     """parses a fragment of code as a comma-separated list of expressions"""
+
     def __init__(self, code, **exception_kwargs):
         self.codeargs = []
         self.args = []
         self.declared_identifiers = set()
         self.undeclared_identifiers = set()
-        if isinstance(code, compat.string_types):
+        if isinstance(code, str):
             if re.match(r"\S", code) and not re.match(r",\s*$", code):
                 # if theres text and no trailing comma, insure its parsed
                 # as a tuple by adding a trailing comma
-                code  += ","
+                code += ","
             expr = pyparser.parse(code, "exec", **exception_kwargs)
         else:
             expr = code
@@ -60,58 +68,69 @@ class ArgumentList(object):
         f = pyparser.FindTuple(self, PythonCode, **exception_kwargs)
         f.visit(expr)
 
+
 class PythonFragment(PythonCode):
+
     """extends PythonCode to provide identifier lookups in partial control
     statements
 
-    e.g.
+    e.g.::
+
         for x in 5:
         elif y==9:
         except (MyException, e):
-    etc.
+
     """
+
     def __init__(self, code, **exception_kwargs):
-        m = re.match(r'^(\w+)(?:\s+(.*?))?:\s*(#|$)', code.strip(), re.S)
+        m = re.match(r"^(\w+)(?:\s+(.*?))?:\s*(#|$)", code.strip(), re.S)
         if not m:
             raise exceptions.CompileException(
-                          "Fragment '%s' is not a partial control statement" %
-                          code, **exception_kwargs)
+                "Fragment '%s' is not a partial control statement" % code,
+                **exception_kwargs,
+            )
         if m.group(3):
-            code = code[:m.start(3)]
-        (keyword, expr) = m.group(1,2)
-        if keyword in ['for','if', 'while']:
+            code = code[: m.start(3)]
+        (keyword, expr) = m.group(1, 2)
+        if keyword in ["for", "if", "while"]:
             code = code + "pass"
-        elif keyword == 'try':
+        elif keyword == "try":
             code = code + "pass\nexcept:pass"
-        elif keyword == 'elif' or keyword == 'else':
+        elif keyword in ["elif", "else"]:
             code = "if False:pass\n" + code + "pass"
-        elif keyword == 'except':
+        elif keyword == "except":
             code = "try:pass\n" + code + "pass"
-        elif keyword == 'with':
+        elif keyword == "with":
             code = code + "pass"
         else:
             raise exceptions.CompileException(
-                                "Unsupported control keyword: '%s'" %
-                                keyword, **exception_kwargs)
-        super(PythonFragment, self).__init__(code, **exception_kwargs)
+                "Unsupported control keyword: '%s'" % keyword,
+                **exception_kwargs,
+            )
+        super().__init__(code, **exception_kwargs)
 
 
-class FunctionDecl(object):
+class FunctionDecl:
+
     """function declaration"""
+
     def __init__(self, code, allow_kwargs=True, **exception_kwargs):
         self.code = code
         expr = pyparser.parse(code, "exec", **exception_kwargs)
 
         f = pyparser.ParseFunc(self, **exception_kwargs)
         f.visit(expr)
-        if not hasattr(self, 'funcname'):
+        if not hasattr(self, "funcname"):
             raise exceptions.CompileException(
-                            "Code '%s' is not a function declaration" % code,
-                            **exception_kwargs)
+                "Code '%s' is not a function declaration" % code,
+                **exception_kwargs,
+            )
         if not allow_kwargs and self.kwargs:
             raise exceptions.CompileException(
-                                "'**%s' keyword argument not allowed here" %
-                                self.kwargnames[-1], **exception_kwargs)
+                "'**%s' keyword argument not allowed here"
+                % self.kwargnames[-1],
+                **exception_kwargs,
+            )
 
     def get_argument_expressions(self, as_call=False):
         """Return the argument declarations of this FunctionDecl as a printable
@@ -146,8 +165,10 @@ class FunctionDecl(object):
                     # `def foo(*, a=1, b, c=3)`
                     namedecls.append(name)
                 else:
-                    namedecls.append("%s=%s" % (
-                        name, pyparser.ExpressionGenerator(default).value()))
+                    namedecls.append(
+                        "%s=%s"
+                        % (name, pyparser.ExpressionGenerator(default).value())
+                    )
             else:
                 namedecls.append(name)
 
@@ -160,8 +181,10 @@ class FunctionDecl(object):
                 namedecls.append(name)
             else:
                 default = defaults.pop(0)
-                namedecls.append("%s=%s" % (
-                    name, pyparser.ExpressionGenerator(default).value()))
+                namedecls.append(
+                    "%s=%s"
+                    % (name, pyparser.ExpressionGenerator(default).value())
+                )
 
         namedecls.reverse()
         return namedecls
@@ -170,9 +193,10 @@ class FunctionDecl(object):
     def allargnames(self):
         return tuple(self.argnames) + tuple(self.kwargnames)
 
+
 class FunctionArgs(FunctionDecl):
+
     """the argument portion of a function declaration"""
 
     def __init__(self, code, **kwargs):
-        super(FunctionArgs, self).__init__("def ANON(%s):pass" % code,
-                **kwargs)
+        super().__init__("def ANON(%s):pass" % code, **kwargs)

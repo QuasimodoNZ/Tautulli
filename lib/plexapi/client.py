@@ -1,15 +1,13 @@
 # -*- coding: utf-8 -*-
+import time
+from xml.etree import ElementTree
 
 import requests
-
-from requests.status_codes import _codes as codes
-from plexapi import BASE_HEADERS, CONFIG, TIMEOUT
-from plexapi import log, logfilter, utils
+from plexapi import BASE_HEADERS, CONFIG, TIMEOUT, log, logfilter, utils
 from plexapi.base import PlexObject
-from plexapi.compat import ElementTree
-from plexapi.exceptions import BadRequest, Unsupported
+from plexapi.exceptions import BadRequest, NotFound, Unauthorized, Unsupported
 from plexapi.playqueue import PlayQueue
-
+from requests.status_codes import _codes as codes
 
 DEFAULT_MTYPE = 'video'
 
@@ -25,8 +23,10 @@ class PlexClient(PlexObject):
             server (:class:`~plexapi.server.PlexServer`): PlexServer this client is connected to (optional).
             data (ElementTree): Response from PlexServer used to build this object (optional).
             initpath (str): Path used to generate data.
-            baseurl (str): HTTP URL to connect dirrectly to this client.
-            token (str): X-Plex-Token used for authenication (optional).
+            baseurl (str): HTTP URL to connect directly to this client.
+            identifier (str): The resource/machine identifier for the desired client.
+                May be necessary when connecting to a specific proxied client (optional).
+            token (str): X-Plex-Token used for authentication (optional).
             session (:class:`~requests.Session`): requests.Session object if you want more control (optional).
             timeout (int): timeout in seconds on initial connect to client (default config.TIMEOUT).
 
@@ -48,29 +48,33 @@ class PlexClient(PlexObject):
             session (:class:`~requests.Session`): Session object used for connection.
             state (str): Unknown
             title (str): Name of this client (Johns iPhone, etc).
-            token (str): X-Plex-Token used for authenication
+            token (str): X-Plex-Token used for authentication
             vendor (str): Unknown
             version (str): Device version (4.6.1, etc).
             _baseurl (str): HTTP address of the client.
             _token (str): Token used to access this client.
             _session (obj): Requests session object used to access this client.
             _proxyThroughServer (bool): Set to True after calling
-                :func:`~plexapi.client.PlexClient.proxyThroughServer()` (default False).
+                :func:`~plexapi.client.PlexClient.proxyThroughServer` (default False).
     """
     TAG = 'Player'
     key = '/resources'
 
     def __init__(self, server=None, data=None, initpath=None, baseurl=None,
-          token=None, connect=True, session=None, timeout=None):
+          identifier=None, token=None, connect=True, session=None, timeout=None):
         super(PlexClient, self).__init__(server, data, initpath)
         self._baseurl = baseurl.strip('/') if baseurl else None
+        self._clientIdentifier = identifier
         self._token = logfilter.add_secret(token)
         self._showSecrets = CONFIG.get('log.show_secrets', '').lower() == 'true'
         server_session = server._session if server else None
         self._session = session or server_session or requests.Session()
         self._proxyThroughServer = False
         self._commandId = 0
-        if not any([data, initpath, baseurl, token]):
+        self._last_call = 0
+        self._timeline_cache = []
+        self._timeline_cache_timestamp = 0
+        if not any([data is not None, initpath, baseurl, token]):
             self._baseurl = CONFIG.get('auth.client_baseurl', 'http://localhost:32433')
             self._token = logfilter.add_secret(CONFIG.get('auth.client_token'))
         if connect and self._baseurl:
@@ -89,7 +93,24 @@ class PlexClient(PlexObject):
             raise Unsupported('Cannot reload an object not built from a URL.')
         self._initpath = self.key
         data = self.query(self.key, timeout=timeout)
-        self._loadData(data[0])
+        if not data:
+            raise NotFound(f"Client not found at {self._baseurl}")
+        if self._clientIdentifier:
+            client = next(
+                (
+                    x
+                    for x in data
+                    if x.attrib.get("machineIdentifier") == self._clientIdentifier
+                ),
+                None,
+            )
+            if client is None:
+                raise NotFound(
+                    f"Client with identifier {self._clientIdentifier} not found at {self._baseurl}"
+                )
+        else:
+            client = data[0]
+        self._loadData(client)
         return self
 
     def reload(self):
@@ -109,17 +130,20 @@ class PlexClient(PlexObject):
         self.platformVersion = data.attrib.get('platformVersion')
         self.title = data.attrib.get('title') or data.attrib.get('name')
         # Active session details
-        # Since protocolCapabilities is missing from /sessions we cant really control this player without
+        # Since protocolCapabilities is missing from /sessions we can't really control this player without
         # creating a client manually.
         # Add this in next breaking release.
         # if self._initpath == 'status/sessions':
         self.device = data.attrib.get('device')         # session
+        self.profile = data.attrib.get('profile')       # session
         self.model = data.attrib.get('model')           # session
         self.state = data.attrib.get('state')           # session
         self.vendor = data.attrib.get('vendor')         # session
         self.version = data.attrib.get('version')       # session
-        self.local = utils.cast(bool, data.attrib.get('local', 0))
-        self.address = data.attrib.get('address')        # session
+        self.local = utils.cast(bool, data.attrib.get('local', 0))  # session
+        self.relayed = utils.cast(bool, data.attrib.get('relayed', 0))  # session
+        self.secure = utils.cast(bool, data.attrib.get('secure', 0))  # session
+        self.address = data.attrib.get('address')       # session
         self.remotePublicAddress = data.attrib.get('remotePublicAddress')
         self.userID = data.attrib.get('userID')
 
@@ -139,7 +163,7 @@ class PlexClient(PlexObject):
                 value (bool): Enable or disable proxying (optional, default True).
 
             Raises:
-                :class:`~plexapi.exceptions.Unsupported`: Cannot use client proxy with unknown server.
+                :exc:`~plexapi.exceptions.Unsupported`: Cannot use client proxy with unknown server.
         """
         if server:
             self._server = server
@@ -158,16 +182,21 @@ class PlexClient(PlexObject):
         log.debug('%s %s', method.__name__.upper(), url)
         headers = self._headers(**headers or {})
         response = method(url, headers=headers, timeout=timeout, **kwargs)
-        if response.status_code not in (200, 201):
+        if response.status_code not in (200, 201, 204):
             codename = codes.get(response.status_code)[0]
             errtext = response.text.replace('\n', ' ')
-            log.warning('BadRequest (%s) %s %s; %s' % (response.status_code, codename, response.url, errtext))
-            raise BadRequest('(%s) %s; %s %s' % (response.status_code, codename, response.url, errtext))
+            message = f'({response.status_code}) {codename}; {response.url} {errtext}'
+            if response.status_code == 401:
+                raise Unauthorized(message)
+            elif response.status_code == 404:
+                raise NotFound(message)
+            else:
+                raise BadRequest(message)
         data = response.text.encode('utf8')
         return ElementTree.fromstring(data) if data.strip() else None
 
     def sendCommand(self, command, proxy=None, **params):
-        """ Convenience wrapper around :func:`~plexapi.client.PlexClient.query()` to more easily
+        """ Convenience wrapper around :func:`~plexapi.client.PlexClient.query` to more easily
             send simple commands to the client. Returns an ElementTree object containing
             the response.
 
@@ -177,22 +206,42 @@ class PlexClient(PlexObject):
                 **params (dict): Additional GET parameters to include with the command.
 
             Raises:
-                :class:`~plexapi.exceptions.Unsupported`: When we detect the client
-                    doesn't support this capability.
+                :exc:`~plexapi.exceptions.Unsupported`: When we detect the client doesn't support this capability.
         """
         command = command.strip('/')
         controller = command.split('/')[0]
+        headers = {'X-Plex-Target-Client-Identifier': self.machineIdentifier}
         if controller not in self.protocolCapabilities:
-            log.debug('Client %s doesnt support %s controller.'
-                      'What your trying might not work' % (self.title, controller))
+            log.debug("Client %s doesn't support %s controller. What your trying might not work", self.title, controller)
+
+        proxy = self._proxyThroughServer if proxy is None else proxy
+        query = self._server.query if proxy else self.query
+
+        # Workaround for ptp. See https://github.com/pkkid/python-plexapi/issues/244
+        t = time.time()
+        if command == 'timeline/poll':
+            self._last_call = t
+        elif t - self._last_call >= 80 and self.product in ('ptp', 'Plex Media Player'):
+            self._last_call = t
+            self.sendCommand(ClientTimeline.key, wait=0)
 
         params['commandID'] = self._nextCommandId()
-        key = '/player/%s%s' % (command, utils.joinArgs(params))
-        headers = {'X-Plex-Target-Client-Identifier': self.machineIdentifier}
-        proxy = self._proxyThroughServer if proxy is None else proxy
-        if proxy:
-            return self._server.query(key, headers=headers)
-        return self.query(key, headers=headers)
+        key = f'/player/{command}{utils.joinArgs(params)}'
+
+        try:
+            return query(key, headers=headers)
+        except ElementTree.ParseError:
+            # Workaround for players which don't return valid XML on successful commands
+            #   - Plexamp, Plex for Android: `b'OK'`
+            #   - Plex for Samsung: `b'<?xml version="1.0"?><Response code="200" status="OK">'`
+            if self.product in (
+                'Plexamp',
+                'Plex for Android (TV)',
+                'Plex for Android (Mobile)',
+                'Plex for Samsung',
+            ):
+                return
+            raise
 
     def url(self, key, includeToken=False):
         """ Build a URL string with proper token argument. Token will be appended to the URL
@@ -202,8 +251,8 @@ class PlexClient(PlexObject):
             raise BadRequest('PlexClient object missing baseurl.')
         if self._token and (includeToken or self._showSecrets):
             delim = '&' if '?' in key else '?'
-            return '%s%s%sX-Plex-Token=%s' % (self._baseurl, key, delim, self._token)
-        return '%s%s' % (self._baseurl, key)
+            return f'{self._baseurl}{key}{delim}X-Plex-Token={self._token}'
+        return f'{self._baseurl}{key}'
 
     # ---------------------
     # Navigation Commands
@@ -270,19 +319,21 @@ class PlexClient(PlexObject):
             Parameters:
                 media (:class:`~plexapi.media.Media`): Media object to navigate to.
                 **params (dict): Additional GET parameters to include with the command.
-
-            Raises:
-                :class:`~plexapi.exceptions.Unsupported`: When no PlexServer specified in this object.
         """
-        if not self._server:
-            raise Unsupported('A server must be specified before using this command.')
         server_url = media._server._baseurl.split(':')
-        self.sendCommand('mirror/details', **dict({
-            'machineIdentifier': self._server.machineIdentifier,
+        command = {
+            'machineIdentifier': media._server.machineIdentifier,
             'address': server_url[1].strip('/'),
             'port': server_url[-1],
             'key': media.key,
-        }, **params))
+            'protocol': server_url[0],
+            **params,
+        }
+        token = media._server.createToken()
+        if token:
+            command["token"] = token
+
+        self.sendCommand("mirror/details", **command)
 
     # -------------------
     # Playback Commands
@@ -438,33 +489,40 @@ class PlexClient(PlexObject):
                     representing the beginning (default 0).
                 **params (dict): Optional additional parameters to include in the playback request. See
                     also: https://github.com/plexinc/plex-media-player/wiki/Remote-control-API#modified-commands
-
-            Raises:
-                :class:`~plexapi.exceptions.Unsupported`: When no PlexServer specified in this object.
         """
-        if not self._server:
-            raise Unsupported('A server must be specified before using this command.')
         server_url = media._server._baseurl.split(':')
+        server_port = server_url[-1].strip('/')
 
-        if self.product != 'OpenPHT':
-            try:
-                self.sendCommand('timeline/subscribe', port=server_url[1].strip('/'), protocol='http')
-            except:  # noqa: E722
-                # some clients dont need or like this and raises http 400.
-                # We want to include the exception in the log,
-                # but it might still work so we swallow it.
-                log.exception('%s failed to subscribe ' % self.title)
+        if hasattr(media, "playlistType"):
+            mediatype = media.playlistType
+        else:
+            if isinstance(media, PlayQueue):
+                mediatype = media.items[0].listType
+            else:
+                mediatype = media.listType
 
-        playqueue = media if isinstance(media, PlayQueue) else self._server.createPlayQueue(media)
-        self.sendCommand('playback/playMedia', **dict({
-            'machineIdentifier': self._server.machineIdentifier,
+        # mediatype must be in ["video", "music", "photo"]
+        if mediatype == "audio":
+            mediatype = "music"
+
+        playqueue = media if isinstance(media, PlayQueue) else media._server.createPlayQueue(media)
+        command = {
+            'providerIdentifier': 'com.plexapp.plugins.library',
+            'machineIdentifier': media._server.machineIdentifier,
+            'protocol': server_url[0],
             'address': server_url[1].strip('/'),
-            'port': server_url[-1],
+            'port': server_port,
             'offset': offset,
-            'key': media.key,
-            'token': media._server._token,
-            'containerKey': '/playQueues/%s?window=100&own=1' % playqueue.playQueueID,
-        }, **params))
+            'key': media.key or playqueue.selectedItem.key,
+            'type': mediatype,
+            'containerKey': f'/playQueues/{playqueue.playQueueID}?window=100&own=1',
+            **params,
+        }
+        token = media._server.createToken()
+        if token:
+            command["token"] = token
+
+        self.sendCommand("playback/playMedia", **command)
 
     def setParameters(self, volume=None, shuffle=None, repeat=None, mtype=DEFAULT_MTYPE):
         """ Set multiple playback parameters at once.
@@ -508,20 +566,68 @@ class PlexClient(PlexObject):
 
     # -------------------
     # Timeline Commands
-    def timeline(self):
-        """ Poll the current timeline and return the XML response. """
-        return self.sendCommand('timeline/poll', wait=1)
+    def timelines(self, wait=0):
+        """Poll the client's timelines, create, and return timeline objects.
+           Some clients may not always respond to timeline requests, believe this
+           to be a Plex bug.
+        """
+        t = time.time()
+        if t - self._timeline_cache_timestamp > 1:
+            self._timeline_cache_timestamp = t
+            timelines = self.sendCommand(ClientTimeline.key, wait=wait) or []
+            self._timeline_cache = [ClientTimeline(self, data) for data in timelines]
 
-    def isPlayingMedia(self, includePaused=False):
-        """ Returns True if any media is currently playing.
+        return self._timeline_cache
+
+    @property
+    def timeline(self):
+        """Returns the active timeline object."""
+        return next((x for x in self.timelines() if x.state != 'stopped'), None)
+
+    def isPlayingMedia(self, includePaused=True):
+        """Returns True if any media is currently playing.
 
             Parameters:
                 includePaused (bool): Set True to treat currently paused items
-                    as playing (optional; default True).
+                                      as playing (optional; default True).
         """
-        for mediatype in self.timeline():
-            if mediatype.get('state') == 'playing':
-                return True
-            if includePaused and mediatype.get('state') == 'paused':
-                return True
-        return False
+        state = getattr(self.timeline, "state", None)
+        return bool(state == 'playing' or (includePaused and state == 'paused'))
+
+
+class ClientTimeline(PlexObject):
+    """Get the timeline's attributes."""
+
+    key = 'timeline/poll'
+
+    def _loadData(self, data):
+        self._data = data
+        self.address = data.attrib.get('address')
+        self.audioStreamId = utils.cast(int, data.attrib.get('audioStreamId'))
+        self.autoPlay = utils.cast(bool, data.attrib.get('autoPlay'))
+        self.containerKey = data.attrib.get('containerKey')
+        self.controllable = data.attrib.get('controllable')
+        self.duration = utils.cast(int, data.attrib.get('duration'))
+        self.itemType = data.attrib.get('itemType')
+        self.key = data.attrib.get('key')
+        self.location = data.attrib.get('location')
+        self.machineIdentifier = data.attrib.get('machineIdentifier')
+        self.partCount = utils.cast(int, data.attrib.get('partCount'))
+        self.partIndex = utils.cast(int, data.attrib.get('partIndex'))
+        self.playQueueID = utils.cast(int, data.attrib.get('playQueueID'))
+        self.playQueueItemID = utils.cast(int, data.attrib.get('playQueueItemID'))
+        self.playQueueVersion = utils.cast(int, data.attrib.get('playQueueVersion'))
+        self.port = utils.cast(int, data.attrib.get('port'))
+        self.protocol = data.attrib.get('protocol')
+        self.providerIdentifier = data.attrib.get('providerIdentifier')
+        self.ratingKey = utils.cast(int, data.attrib.get('ratingKey'))
+        self.repeat = utils.cast(int, data.attrib.get('repeat'))
+        self.seekRange = data.attrib.get('seekRange')
+        self.shuffle = utils.cast(bool, data.attrib.get('shuffle'))
+        self.state = data.attrib.get('state')
+        self.subtitleColor = data.attrib.get('subtitleColor')
+        self.subtitlePosition = data.attrib.get('subtitlePosition')
+        self.subtitleSize = utils.cast(int, data.attrib.get('subtitleSize'))
+        self.time = utils.cast(int, data.attrib.get('time'))
+        self.type = data.attrib.get('type')
+        self.volume = utils.cast(int, data.attrib.get('volume'))
