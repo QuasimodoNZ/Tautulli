@@ -246,22 +246,12 @@ def main():
     # Start the background threads
     plexpy.start()
 
-    # Force the http port if neccessary
+    # Force the http port if necessary
     if args.port:
         plexpy.HTTP_PORT = args.port
         logger.info('Using forced web server port: %i', plexpy.HTTP_PORT)
     else:
         plexpy.HTTP_PORT = int(plexpy.CONFIG.HTTP_PORT)
-
-    # Check if pyOpenSSL is installed. It is required for certificate generation
-    # and for CherryPy.
-    if plexpy.CONFIG.ENABLE_HTTPS:
-        try:
-            import OpenSSL
-        except ImportError:
-            logger.warn("The pyOpenSSL module is missing. Install this "
-                        "module to enable HTTPS. HTTPS will be disabled.")
-            plexpy.CONFIG.ENABLE_HTTPS = False
 
     # Try to start the server. Will exit here is address is already in use.
     webstart.start()

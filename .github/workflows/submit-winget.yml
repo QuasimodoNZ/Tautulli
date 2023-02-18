@@ -1,4 +1,4 @@
-name: Submit Tautulli package to Windows Package Manager Community Repository
+name: Submit winget
 
 on:
   workflow_dispatch: ~
@@ -7,13 +7,13 @@ on:
 
 jobs:
   winget:
-    name: Publish Winget Package
+    name: Submit Winget Package
     runs-on: windows-latest
     steps:
       - name: Submit package to Windows Package Manager Community Repository
         run: |
           $wingetPackage = "Tautulli.Tautulli"
-          $gitToken = "${{ secrets.GITHUB_TOKEN }}"
+          $gitToken = "${{ secrets.WINGET_TOKEN }}"
 
           $github = Invoke-RestMethod -uri "https://api.github.com/repos/Tautulli/Tautulli/releases/latest"
           $installerUrl = $github | Select -ExpandProperty assets -First 1 | Where-Object -Property name -match "Tautulli-windows-.*-x64.exe" | Select -ExpandProperty browser_download_url

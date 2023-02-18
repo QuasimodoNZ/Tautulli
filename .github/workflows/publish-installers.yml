@@ -24,7 +24,7 @@ jobs:
 
     steps:
       - name: Checkout Code
-        uses: actions/checkout@v3.1.0
+        uses: actions/checkout@v3.2.0
 
       - name: Set Release Version
         id: get_version
@@ -52,7 +52,7 @@ jobs:
           echo $GITHUB_SHA > version.txt
 
       - name: Set Up Python
-        uses: actions/setup-python@v4.3.0
+        uses: actions/setup-python@v4.4.0
         with:
           python-version: '3.9'
           cache: pip
@@ -103,7 +103,7 @@ jobs:
         uses: technote-space/workflow-conclusion-action@v3.0
 
       - name: Checkout Code
-        uses: actions/checkout@v3.1.0
+        uses: actions/checkout@v3.2.0
 
       - name: Set Release Version
         id: get_version
@@ -117,14 +117,15 @@ jobs:
       - name: Get Changelog
         id: get_changelog
         run: |
-          echo "CHANGELOG="$( sed -n '/^## /{p; :loop n; p; /^## /q; b loop}' CHANGELOG.md \" >> $GITHUB_OUTPUT
-            | sed '$d' | sed '$d' | sed '$d' | sed ':a;N;$!ba;s/\n/%0A/g' )"
+          CHANGELOG="$( sed -n '/^## /{p; :loop n; p; /^## /q; b loop}' CHANGELOG.md \
+            | sed '$d' | sed '$d' | sed '$d' )"
+          echo "CHANGELOG=${CHANGELOG}" >> $GITHUB_OUTPUT
 
       - name: Create Release
         uses: actions/create-release@v1
         id: create_release
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GHACTIONS_TOKEN }}
         with:
           tag_name: ${{ steps.get_version.outputs.RELEASE_VERSION }}
           release_name: Tautulli ${{ steps.get_version.outputs.RELEASE_VERSION }}
@@ -139,7 +140,7 @@ jobs:
         uses: actions/upload-release-asset@v1
         if: env.WORKFLOW_CONCLUSION == 'success'
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GHACTIONS_TOKEN }}
         with:
           upload_url: ${{ steps.create_release.outputs.upload_url }}
           asset_path: Tautulli-windows-installer/Tautulli-windows-${{ steps.get_version.outputs.RELEASE_VERSION }}-x64.exe
@@ -150,7 +151,7 @@ jobs:
         uses: actions/upload-release-asset@v1
         if: env.WORKFLOW_CONCLUSION == 'success'
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GHACTIONS_TOKEN }}
         with:
           upload_url: ${{ steps.create_release.outputs.upload_url }}
           asset_path: Tautulli-macos-installer/Tautulli-macos-${{ steps.get_version.outputs.RELEASE_VERSION }}-x64.pkg
