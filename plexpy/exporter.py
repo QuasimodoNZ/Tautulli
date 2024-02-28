@@ -186,6 +186,7 @@ class Export(object):
                 'duration': None,
                 'durationHuman': lambda o: helpers.human_duration(getattr(o, 'duration', 0)),
                 'editionTitle': None,
+                'enableCreditsMarkerGeneration': None,
                 'fields': {
                     'name': None,
                     'locked': None
@@ -198,6 +199,7 @@ class Export(object):
                 'guids': {
                     'id': None
                 },
+                'hasCreditsMarker': None,
                 'hasPreviewThumbnails': None,
                 'key': None,
                 'labels': {
@@ -211,6 +213,14 @@ class Export(object):
                 'librarySectionKey': None,
                 'librarySectionTitle': None,
                 'locations': None,
+                'markers': {
+                    'end': None,
+                    'final': None,
+                    'first': None,
+                    'id': None,
+                    'start': None,
+                    'type': None
+                },
                 'media': {
                     'aspectRatio': None,
                     'audioChannels': None,
@@ -353,10 +363,15 @@ class Export(object):
                             'forced': None,
                             'format': None,
                             'headerCompression': None,
-                            'transient': None
+                            'providerTitle': None,
+                            'score': None,
+                            'sourceKey': None,
+                            'transient': None,
+                            'userID': None
                         }
                     }
                 },
+                'metadataDirectory': None,
                 'originallyAvailableAt': partial(helpers.datetime_to_iso, to_date=True),
                 'originalTitle': None,
                 'producers': {
@@ -403,10 +418,9 @@ class Export(object):
                 'artFile': lambda o: self.get_image(o, 'art'),
                 'audienceRating': None,
                 'audienceRatingImage': None,
+                'audioLanguage': None,
                 'autoDeletionItemPolicyUnwatchedLibrary': None,
                 'autoDeletionItemPolicyWatchedLibrary': None,
-                'banner': None,
-                'bannerFile': lambda o: self.get_image(o, 'banner'),
                 'childCount': None,
                 'collections': {
                     'id': None,
@@ -415,6 +429,7 @@ class Export(object):
                 'contentRating': None,
                 'duration': None,
                 'durationHuman': lambda o: helpers.human_duration(getattr(o, 'duration', 0)),
+                'enableCreditsMarkerGeneration': None,
                 'episodeSort': None,
                 'fields': {
                     'name': None,
@@ -443,6 +458,7 @@ class Export(object):
                 'librarySectionKey': None,
                 'librarySectionTitle': None,
                 'locations': None,
+                'metadataDirectory': None,
                 'network': None,
                 'originallyAvailableAt': partial(helpers.datetime_to_iso, to_date=True),
                 'originalTitle': None,
@@ -454,8 +470,11 @@ class Export(object):
                     'role': None,
                     'thumb': None
                 },
+                'seasonCount': None,
                 'showOrdering': None,
                 'studio': None,
+                'subtitleLanguage': None,
+                'subtitleMode': None,
                 'summary': None,
                 'tagline': None,
                 'theme': None,
@@ -481,6 +500,7 @@ class Export(object):
                 'art': None,
                 'artBlurHash': None,
                 'artFile': lambda o: self.get_image(o, 'art'),
+                'audioLanguage': None,
                 'collections': {
                     'id': None,
                     'tag': None
@@ -505,6 +525,7 @@ class Export(object):
                 'librarySectionID': None,
                 'librarySectionKey': None,
                 'librarySectionTitle': None,
+                'metadataDirectory': None,
                 'parentGuid': None,
                 'parentIndex': None,
                 'parentKey': None,
@@ -515,6 +536,8 @@ class Export(object):
                 'parentTitle': None,
                 'ratingKey': None,
                 'seasonNumber': None,
+                'subtitleLanguage': None,
+                'subtitleMode': None,
                 'summary': None,
                 'thumb': None,
                 'thumbBlurHash': None,
@@ -576,6 +599,7 @@ class Export(object):
                     'id': None
                 },
                 'hasCommercialMarker': None,
+                'hasCreditsMarker': None,
                 'hasIntroMarker': None,
                 'hasPreviewThumbnails': None,
                 'index': None,
@@ -592,6 +616,9 @@ class Export(object):
                 'locations': None,
                 'markers': {
                     'end': None,
+                    'final': None,
+                    'first': None,
+                    'id': None,
                     'start': None,
                     'type': None
                 },
@@ -737,10 +764,15 @@ class Export(object):
                             'forced': None,
                             'format': None,
                             'headerCompression': None,
-                            'transient': None
+                            'providerTitle': None,
+                            'score': None,
+                            'sourceKey': None,
+                            'transient': None,
+                            'userID': None
                         }
                     }
                 },
+                'metadataDirectory': None,
                 'originallyAvailableAt': partial(helpers.datetime_to_iso, to_date=True),
                 'parentGuid': None,
                 'parentIndex': None,
@@ -821,6 +853,7 @@ class Export(object):
                 'librarySectionKey': None,
                 'librarySectionTitle': None,
                 'locations': None,
+                'metadataDirectory': None,
                 'moods': {
                     'id': None,
                     'tag': None
@@ -890,6 +923,7 @@ class Export(object):
                 'librarySectionKey': None,
                 'librarySectionTitle': None,
                 'loudnessAnalysisVersion': None,
+                'metadataDirectory': None,
                 'moods': {
                     'id': None,
                     'tag': None
@@ -934,6 +968,14 @@ class Export(object):
                 'addedAt': helpers.datetime_to_iso,
                 'art': None,
                 'artBlurHash': None,
+                'chapters': {
+                    'id': None,
+                    'tag': None,
+                    'index': None,
+                    'start': None,
+                    'end': None,
+                    'thumb': None
+                },
                 'chapterSource': None,
                 'collections': {
                     'id': None,
@@ -1051,6 +1093,7 @@ class Export(object):
                         }
                     }
                 },
+                'metadataDirectory': None,
                 'moods': {
                     'id': None,
                     'tag': None
@@ -1097,6 +1140,7 @@ class Export(object):
                 'librarySectionID': None,
                 'librarySectionKey': None,
                 'librarySectionTitle': None,
+                'metadataDirectory': None,
                 'ratingKey': None,
                 'summary': None,
                 'thumb': None,
@@ -1128,6 +1172,7 @@ class Export(object):
                 'librarySectionKey': None,
                 'librarySectionTitle': None,
                 'locations': None,
+                'metadataDirectory': None,
                 'originallyAvailableAt': partial(helpers.datetime_to_iso, to_date=True),
                 'parentGuid': None,
                 'parentIndex': None,
@@ -1202,6 +1247,7 @@ class Export(object):
                 'librarySectionKey': None,
                 'librarySectionTitle': None,
                 'maxYear': None,
+                'metadataDirectory': None,
                 'minYear': None,
                 'ratingKey': None,
                 'subtype': None,
@@ -1230,6 +1276,7 @@ class Export(object):
                 'icon': None,
                 'key': None,
                 'leafCount': None,
+                'metadataDirectory': None,
                 'playlistType': None,
                 'ratingKey': None,
                 'smart': None,
@@ -1270,12 +1317,14 @@ class Export(object):
                 1: [
                     'ratingKey', 'title', 'titleSort', 'originalTitle', 'editionTitle', 'originallyAvailableAt', 'year', 'addedAt',
                     'rating', 'ratingImage', 'audienceRating', 'audienceRatingImage', 'userRating', 'contentRating',
-                    'studio', 'tagline', 'summary', 'guid', 'duration', 'durationHuman', 'type'
+                    'studio', 'tagline', 'summary', 'guid', 'duration', 'durationHuman', 'type',
+                    'hasCreditsMarker'
                 ],
                 2: [
                     'directors.tag', 'writers.tag', 'producers.tag', 'roles.tag', 'roles.role',
                     'countries.tag', 'genres.tag', 'collections.tag', 'labels.tag',
-                    'fields.name', 'fields.locked', 'guids.id'
+                    'fields.name', 'fields.locked', 'guids.id',
+                    'markers.type', 'markers.start', 'markers.end', 'markers.first', 'markers.final'
                 ],
                 3: [
                     'art', 'thumb', 'key', 'chapterSource',
@@ -1333,7 +1382,7 @@ class Export(object):
                 1: [
                     'ratingKey', 'title', 'titleSort', 'originallyAvailableAt', 'originalTitle', 'year', 'addedAt',
                     'rating', 'audienceRating', 'audienceRatingImage', 'userRating', 'contentRating', 'network',
-                    'studio', 'tagline', 'summary', 'guid', 'duration', 'durationHuman', 'type', 'childCount',
+                    'studio', 'tagline', 'summary', 'guid', 'duration', 'durationHuman', 'type', 'childCount', 'seasonCount',
                     'seasons'
                 ],
                 2: [
@@ -1342,7 +1391,7 @@ class Export(object):
                     'fields.name', 'fields.locked', 'guids.id'
                 ],
                 3: [
-                    'art', 'thumb', 'banner', 'theme', 'key',
+                    'art', 'thumb', 'theme', 'key',
                     'updatedAt', 'lastViewedAt', 'viewCount', 'lastRatedAt'
                 ],
                 9: self._get_all_metadata_attrs(_media_type)
@@ -1383,12 +1432,12 @@ class Export(object):
                     'summary', 'guid', 'duration', 'durationHuman', 'type', 'episodeNumber', 'seasonEpisode',
                     'parentTitle', 'parentRatingKey', 'parentGuid', 'parentYear', 'seasonNumber',
                     'grandparentTitle', 'grandparentRatingKey', 'grandparentGuid',
-                    'hasCommercialMarker', 'hasIntroMarker'
+                    'hasCommercialMarker', 'hasCreditsMarker', 'hasIntroMarker'
                 ],
                 2: [
                     'collections.tag', 'directors.tag', 'writers.tag', 'producers.tag', 'roles.tag', 'roles.role',
                     'fields.name', 'fields.locked', 'guids.id',
-                    'markers.type', 'markers.start', 'markers.end'
+                    'markers.type', 'markers.start', 'markers.end', 'markers.first', 'markers.final'
                 ],
                 3: [
                     'art', 'thumb', 'key', 'chapterSource',
@@ -1813,7 +1862,7 @@ class Export(object):
 
         threading.Thread(target=self._real_export).start()
 
-        return True
+        return self.export_id
 
     def add_export(self):
         keys = {
@@ -2218,8 +2267,6 @@ class Export(object):
             image_url = item.thumbUrl
         elif image == 'art':
             image_url = item.artUrl
-        elif image == 'banner':
-            image_url = item.bannerUrl
 
         if not image_url:
             return
@@ -2267,9 +2314,9 @@ class ExportObject(Export):
 
 def get_export(export_id):
     db = database.MonitorDatabase()
-    result = db.select_single('SELECT timestamp, title, file_format, thumb_level, art_level, '
-                              'individual_files, complete '
-                              'FROM exports WHERE id = ?',
+    result = db.select_single("SELECT timestamp, title, file_format, thumb_level, art_level, "
+                              "individual_files, complete "
+                              "FROM exports WHERE id = ?",
                               [export_id])
 
     if result:
@@ -2300,7 +2347,7 @@ def delete_export(export_id):
         if deleted:
             logger.info("Tautulli Exporter :: Deleting export_id %s from the database.", export_id)
             db = database.MonitorDatabase()
-            result = db.action('DELETE FROM exports WHERE id = ?', args=[export_id])
+            result = db.action("DELETE FROM exports WHERE id = ?", args=[export_id])
 
         return deleted
     else:
@@ -2325,7 +2372,7 @@ def delete_all_exports():
 
 def cancel_exports():
     db = database.MonitorDatabase()
-    db.action('UPDATE exports SET complete = -1 WHERE complete = 0')
+    db.action("UPDATE exports SET complete = -1 WHERE complete = 0")
 
 
 def get_export_datatable(section_id=None, user_id=None, rating_key=None, kwargs=None):
@@ -2344,27 +2391,27 @@ def get_export_datatable(section_id=None, user_id=None, rating_key=None, kwargs=
     if rating_key:
         custom_where.append(['exports.rating_key', rating_key])
 
-    columns = ['exports.id AS export_id',
-               'exports.timestamp',
-               'exports.section_id',
-               'exports.user_id',
-               'exports.rating_key',
-               'exports.media_type',
-               'CASE WHEN exports.media_type = "photoalbum" THEN "Photo Album" ELSE '
-               'UPPER(SUBSTR(exports.media_type, 1, 1)) || SUBSTR(exports.media_type, 2) END '
-               'AS media_type_title',
-               'exports.title',
-               'exports.file_format',
-               'exports.metadata_level',
-               'exports.media_info_level',
-               'exports.thumb_level',
-               'exports.art_level',
-               'exports.custom_fields',
-               'exports.individual_files',
-               'exports.file_size',
-               'exports.complete',
-               'exports.total_items',
-               'exports.exported_items'
+    columns = ["exports.id AS export_id",
+               "exports.timestamp",
+               "exports.section_id",
+               "exports.user_id",
+               "exports.rating_key",
+               "exports.media_type",
+               "CASE WHEN exports.media_type = 'photoalbum' THEN 'Photo Album' ELSE "
+               "UPPER(SUBSTR(exports.media_type, 1, 1)) || SUBSTR(exports.media_type, 2) END "
+               "AS media_type_title",
+               "exports.title",
+               "exports.file_format",
+               "exports.metadata_level",
+               "exports.media_info_level",
+               "exports.thumb_level",
+               "exports.art_level",
+               "exports.custom_fields",
+               "exports.individual_files",
+               "exports.file_size",
+               "exports.complete",
+               "exports.total_items",
+               "exports.exported_items"
                ]
     try:
         query = data_tables.ssp_query(table_name='exports',

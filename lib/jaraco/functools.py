@@ -1,9 +1,11 @@
-import functools
-import time
-import inspect
 import collections
-import types
+import functools
+import inspect
 import itertools
+import operator
+import time
+import types
+import warnings
 
 import more_itertools
 
@@ -182,8 +184,9 @@ def method_cache(
     # Support cache clear even before cache has been created.
     wrapper.cache_clear = lambda: None  # type: ignore[attr-defined]
 
-    return (  # type: ignore[return-value]
-        _special_method_cache(method, cache_wrapper) or wrapper
+    return (
+        _special_method_cache(method, cache_wrapper)  # type: ignore[return-value]
+        or wrapper
     )
 
 
@@ -266,11 +269,33 @@ def result_invoke(action):
     return wrap
 
 
-def call_aside(f, *args, **kwargs):
+def invoke(f, *args, **kwargs):
     """
     Call a function for its side effect after initialization.
 
-    >>> @call_aside
+    The benefit of using the decorator instead of simply invoking a function
+    after defining it is that it makes explicit the author's intent for the
+    function to be called immediately. Whereas if one simply calls the
+    function immediately, it's less obvious if that was intentional or
+    incidental. It also avoids repeating the name - the two actions, defining
+    the function and calling it immediately are modeled separately, but linked
+    by the decorator construct.
+
+    The benefit of having a function construct (opposed to just invoking some
+    behavior inline) is to serve as a scope in which the behavior occurs. It
+    avoids polluting the global namespace with local variables, provides an
+    anchor on which to attach documentation (docstring), keeps the behavior
+    logically separated (instead of conceptually separated or not separated at
+    all), and provides potential to re-use the behavior for testing or other
+    purposes.
+
+    This function is named as a pithy way to communicate, "call this function
+    primarily for its side effect", or "while defining this function, also
+    take it aside and call it". It exists because there's no Python construct
+    for "define and call" (nor should there be, as decorators serve this need
+    just fine). The behavior happens immediately and synchronously.
+
+    >>> @invoke
     ... def func(): print("called")
     called
     >>> func()
@@ -278,12 +303,20 @@ def call_aside(f, *args, **kwargs):
 
     Use functools.partial to pass parameters to the initial call
 
-    >>> @functools.partial(call_aside, name='bingo')
+    >>> @functools.partial(invoke, name='bingo')
     ... def func(name): print("called with", name)
     called with bingo
     """
     f(*args, **kwargs)
     return f
+
+
+def call_aside(*args, **kwargs):
+    """
+    Deprecated name for invoke.
+    """
+    warnings.warn("call_aside is deprecated, use invoke", DeprecationWarning)
+    return invoke(*args, **kwargs)
 
 
 class Throttler:
@@ -523,3 +556,51 @@ def except_(*exceptions, replace=None, use=None):
         return wrapper
 
     return decorate
+
+
+def identity(x):
+    return x
+
+
+def bypass_when(check, *, _op=identity):
+    """
+    Decorate a function to return its parameter when ``check``.
+
+    >>> bypassed = []  # False
+
+    >>> @bypass_when(bypassed)
+    ... def double(x):
+    ...     return x * 2
+    >>> double(2)
+    4
+    >>> bypassed[:] = [object()]  # True
+    >>> double(2)
+    2
+    """
+
+    def decorate(func):
+        @functools.wraps(func)
+        def wrapper(param):
+            return param if _op(check) else func(param)
+
+        return wrapper
+
+    return decorate
+
+
+def bypass_unless(check):
+    """
+    Decorate a function to return its parameter unless ``check``.
+
+    >>> enabled = [object()]  # True
+
+    >>> @bypass_unless(enabled)
+    ... def double(x):
+    ...     return x * 2
+    >>> double(2)
+    4
+    >>> del enabled[:]  # False
+    >>> double(2)
+    2
+    """
+    return bypass_when(check, _op=operator.not_)

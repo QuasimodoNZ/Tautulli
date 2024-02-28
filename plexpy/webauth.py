@@ -22,7 +22,7 @@
 
 from future.builtins import object
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from future.moves.urllib.parse import quote, unquote
 
 import cherrypy
@@ -99,7 +99,7 @@ def plex_user_login(token=None, headers=None):
             try:
                 logger.debug("Tautulli WebAuth :: Registering token for user '%s' in the database."
                              % user_details['username'])
-                result = monitor_db.action('UPDATE users SET server_token = ? WHERE user_id = ?',
+                result = monitor_db.action("UPDATE users SET server_token = ? WHERE user_id = ?",
                                            [server_token, user_details['user_id']])
 
                 if result:
@@ -246,12 +246,12 @@ def all_of(*conditions):
 
 def check_rate_limit(ip_address):
     monitor_db = MonitorDatabase()
-    result = monitor_db.select('SELECT timestamp, success FROM user_login '
-                               'WHERE ip_address = ? '
-                               'AND timestamp >= ( '
-                               'SELECT CASE WHEN MAX(timestamp) IS NULL THEN 0 ELSE MAX(timestamp) END '
-                               'FROM user_login WHERE ip_address = ? AND success = 1) '
-                               'ORDER BY timestamp DESC',
+    result = monitor_db.select("SELECT timestamp, success FROM user_login "
+                               "WHERE ip_address = ? "
+                               "AND timestamp >= ( "
+                               "SELECT CASE WHEN MAX(timestamp) IS NULL THEN 0 ELSE MAX(timestamp) END "
+                               "FROM user_login WHERE ip_address = ? AND success = 1) "
+                               "ORDER BY timestamp DESC",
                                [ip_address, ip_address])
 
     try:
@@ -314,7 +314,7 @@ class AuthController(object):
 
     def get_loginform(self, redirect_uri=''):
         from plexpy.webserve import serve_template
-        return serve_template(templatename="login.html", title="Login", redirect_uri=unquote(redirect_uri))
+        return serve_template(template_name="login.html", title="Login", redirect_uri=unquote(redirect_uri))
 
     @cherrypy.expose
     def index(self, *args, **kwargs):
@@ -378,7 +378,7 @@ class AuthController(object):
 
         if valid_login:
             time_delta = timedelta(days=30) if remember_me == '1' else timedelta(minutes=60)
-            expiry = datetime.utcnow() + time_delta
+            expiry = datetime.now(tz=timezone.utc) + time_delta
 
             payload = {
                 'user_id': user_details['user_id'],
@@ -399,7 +399,7 @@ class AuthController(object):
 
             jwt_cookie = str(JWT_COOKIE_NAME + plexpy.CONFIG.PMS_UUID)
             cherrypy.response.cookie[jwt_cookie] = jwt_token
-            cherrypy.response.cookie[jwt_cookie]['expires'] = int(time_delta.total_seconds())
+            cherrypy.response.cookie[jwt_cookie]['max-age'] = int(time_delta.total_seconds())
             cherrypy.response.cookie[jwt_cookie]['path'] = plexpy.HTTP_ROOT.rstrip('/') or '/'
             cherrypy.response.cookie[jwt_cookie]['httponly'] = True
             cherrypy.response.cookie[jwt_cookie]['samesite'] = 'lax'

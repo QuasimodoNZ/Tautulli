@@ -247,7 +247,7 @@ history_table_options = {
         },
         {
             "targets": [11],
-            "data": "duration",
+            "data": "play_duration",
             "render": function (data, type, full) {
                 if (data !== null) {
                     return Math.round(moment.duration(data, 'seconds').as('minutes')) + ' mins';
@@ -263,13 +263,17 @@ history_table_options = {
             "targets": [12],
             "data": "watched_status",
             "createdCell": function (td, cellData, rowData, row, col) {
+                var circleValue = "";
                 if (cellData == 1) {
-                    $(td).html('<span class="watched-tooltip" data-toggle="tooltip" title="' + rowData['percent_complete'] + '%"><i class="fa fa-lg fa-circle"></i></span>');
+                    circleValue = " circle-full";
+                } else if (cellData == 0.75) {
+                    circleValue = " circle-three-quarter";
                 } else if (cellData == 0.5) {
-                    $(td).html('<span class="watched-tooltip" data-toggle="tooltip" title="' + rowData['percent_complete'] + '%"><i class="fa fa-lg fa-adjust fa-rotate-180"></i></span>');
-                } else {
-                    $(td).html('<span class="watched-tooltip" data-toggle="tooltip" title="' + rowData['percent_complete'] + '%"><i class="fa fa-lg fa-circle-o"></i></span>');
+                    circleValue = " circle-half";
+                } else if (cellData == 0.25) {
+                    circleValue = " circle-quarter";
                 }
+                $(td).html('<span class="watched-tooltip" data-toggle="tooltip" title="' + rowData['percent_complete'] + '%"><div class="circle' + circleValue + '" /></span>');
             },
             "searchable": false,
             "orderable": false,
@@ -529,7 +533,7 @@ function childTableFormat(rowData) {
                 '<th align="left" id="started">Started</th>' +
                 '<th align="left" id="paused_counter">Paused</th>' +
                 '<th align="left" id="stopped">Stopped</th>' +
-                '<th align="left" id="duration">Duration</th>' +
+                '<th align="left" id="play_duration">Duration</th>' +
                 '<th align="left" id="percent_complete"></th>' +
             '</tr>' +
             '</thead>' +

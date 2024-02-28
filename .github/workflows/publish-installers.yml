@@ -24,7 +24,7 @@ jobs:
 
     steps:
       - name: Checkout Code
-        uses: actions/checkout@v3.2.0
+        uses: actions/checkout@v4
 
       - name: Set Release Version
         id: get_version
@@ -52,7 +52,7 @@ jobs:
           echo $GITHUB_SHA > version.txt
 
       - name: Set Up Python
-        uses: actions/setup-python@v4.4.0
+        uses: actions/setup-python@v4
         with:
           python-version: '3.9'
           cache: pip
@@ -68,7 +68,7 @@ jobs:
           pyinstaller -y ./package/Tautulli-${{ matrix.os }}.spec
 
       - name: Create Windows Installer
-        uses: joncloud/makensis-action@v3.7
+        uses: joncloud/makensis-action@v4
         if: matrix.os == 'windows'
         with:
           script-file: ./package/Tautulli.nsi
@@ -100,10 +100,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Get Build Job Status
-        uses: technote-space/workflow-conclusion-action@v3.0
+        uses: technote-space/workflow-conclusion-action@v3
 
       - name: Checkout Code
-        uses: actions/checkout@v3.2.0
+        uses: actions/checkout@v4
 
       - name: Set Release Version
         id: get_version
@@ -119,44 +119,27 @@ jobs:
         run: |
           CHANGELOG="$( sed -n '/^## /{p; :loop n; p; /^## /q; b loop}' CHANGELOG.md \
             | sed '$d' | sed '$d' | sed '$d' )"
-          echo "CHANGELOG=${CHANGELOG}" >> $GITHUB_OUTPUT
+          EOF=$(dd if=/dev/urandom bs=15 count=1 status=none | base64)
+          echo "CHANGELOG<<$EOF" >> $GITHUB_OUTPUT
+          echo "$CHANGELOG" >> $GITHUB_OUTPUT
+          echo "$EOF" >> $GITHUB_OUTPUT
 
       - name: Create Release
-        uses: actions/create-release@v1
+        uses: softprops/action-gh-release@v1
         id: create_release
         env:
           GITHUB_TOKEN: ${{ secrets.GHACTIONS_TOKEN }}
         with:
           tag_name: ${{ steps.get_version.outputs.RELEASE_VERSION }}
-          release_name: Tautulli ${{ steps.get_version.outputs.RELEASE_VERSION }}
+          name: Tautulli ${{ steps.get_version.outputs.RELEASE_VERSION }}
           body: |
             ## Changelog
             
             ##${{ steps.get_changelog.outputs.CHANGELOG }}
-          draft: false
           prerelease: ${{ endsWith(steps.get_version.outputs.RELEASE_VERSION, '-beta') }}
-
-      - name: Upload Windows Installer
-        uses: actions/upload-release-asset@v1
-        if: env.WORKFLOW_CONCLUSION == 'success'
-        env:
-          GITHUB_TOKEN: ${{ secrets.GHACTIONS_TOKEN }}
-        with:
-          upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: Tautulli-windows-installer/Tautulli-windows-${{ steps.get_version.outputs.RELEASE_VERSION }}-x64.exe
-          asset_name: Tautulli-windows-${{ steps.get_version.outputs.RELEASE_VERSION }}-x64.exe
-          asset_content_type: application/vnd.microsoft.portable-executable
-
-      - name: Upload MacOS Installer
-        uses: actions/upload-release-asset@v1
-        if: env.WORKFLOW_CONCLUSION == 'success'
-        env:
-          GITHUB_TOKEN: ${{ secrets.GHACTIONS_TOKEN }}
-        with:
-          upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: Tautulli-macos-installer/Tautulli-macos-${{ steps.get_version.outputs.RELEASE_VERSION }}-x64.pkg
-          asset_name: Tautulli-macos-${{ steps.get_version.outputs.RELEASE_VERSION }}-x64.pkg
-          asset_content_type: application/vnd.apple.installer+xml
+          files: |
+            Tautulli-windows-installer/Tautulli-windows-${{ steps.get_version.outputs.RELEASE_VERSION }}-x64.exe
+            Tautulli-macos-installer/Tautulli-macos-${{ steps.get_version.outputs.RELEASE_VERSION }}-x64.pkg
 
   discord:
     name: Discord Notification
@@ -165,7 +148,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Get Build Job Status
-        uses: technote-space/workflow-conclusion-action@v3.0
+        uses: technote-space/workflow-conclusion-action@v3
 
       - name: Combine Job Status
         id: status

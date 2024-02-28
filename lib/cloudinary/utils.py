@@ -78,6 +78,7 @@ __SIMPLE_UPLOAD_PARAMS = [
     "backup",
     "faces",
     "image_metadata",
+    "media_metadata",
     "exif",
     "colors",
     "use_filename",
@@ -91,6 +92,7 @@ __SIMPLE_UPLOAD_PARAMS = [
     "eager_notification_url",
     "eager_async",
     "eval",
+    "on_success",
     "proxy",
     "folder",
     "asset_folder",
@@ -105,6 +107,7 @@ __SIMPLE_UPLOAD_PARAMS = [
     "categorization",
     "detection",
     "similarity_search",
+    "visual_search",
     "background_removal",
     "upload_preset",
     "phash",
@@ -280,7 +283,7 @@ def encode_context(context):
     return "|".join(("{}={}".format(k, normalize_context_value(v))) for k, v in iteritems(context))
 
 
-def json_encode(value):
+def json_encode(value, sort_keys=False):
     """
     Converts value to a json encoded string
 
@@ -288,7 +291,7 @@ def json_encode(value):
 
     :return: JSON encoded string
     """
-    return json.dumps(value, default=__json_serializer, separators=(',', ':'))
+    return json.dumps(value, default=__json_serializer, separators=(',', ':'), sort_keys=sort_keys)
 
 
 def encode_date_to_usage_api_format(date_obj):
@@ -372,8 +375,17 @@ def generate_transformation_string(**options):
     flags = ".".join(build_array(options.pop("flags", None)))
     dpr = options.pop("dpr", cloudinary.config().dpr)
     duration = norm_range_value(options.pop("duration", None))
-    start_offset = norm_auto_range_value(options.pop("start_offset", None))
-    end_offset = norm_range_value(options.pop("end_offset", None))
+    
+    so_raw = options.pop("start_offset", None)
+    start_offset = norm_auto_range_value(so_raw)
+    if start_offset == None:
+        start_offset = so_raw
+
+    eo_raw = options.pop("end_offset", None)
+    end_offset = norm_range_value(eo_raw)
+    if end_offset == None:
+        end_offset = eo_raw
+
     offset = split_range(options.pop("offset", None))
     if offset:
         start_offset = norm_auto_range_value(offset[0])
@@ -699,6 +711,25 @@ def unsigned_download_url_prefix(source, cloud_name, private_cdn, cdn_subdomain,
     return prefix
 
 
+def build_distribution_domain(options):
+    source = options.pop('source', '')
+    cloud_name = options.pop("cloud_name", cloudinary.config().cloud_name or None)
+    if cloud_name is None:
+        raise ValueError("Must supply cloud_name in tag or in configuration")
+    secure = options.pop("secure", cloudinary.config().secure)
+    private_cdn = options.pop("private_cdn", cloudinary.config().private_cdn)
+    cname = options.pop("cname", cloudinary.config().cname)
+    secure_distribution = options.pop("secure_distribution",
+                                      cloudinary.config().secure_distribution)
+    cdn_subdomain = options.pop("cdn_subdomain", cloudinary.config().cdn_subdomain)
+    secure_cdn_subdomain = options.pop("secure_cdn_subdomain",
+                                       cloudinary.config().secure_cdn_subdomain)
+
+    return unsigned_download_url_prefix(
+        source, cloud_name, private_cdn, cdn_subdomain, secure_cdn_subdomain,
+        cname, secure, secure_distribution)
+
+
 def merge(*dict_args):
     result = None
     for dictionary in dict_args:
@@ -727,19 +758,8 @@ def cloudinary_url(source, **options):
     version = options.pop("version", None)
 
     format = options.pop("format", None)
-    cdn_subdomain = options.pop("cdn_subdomain", cloudinary.config().cdn_subdomain)
-    secure_cdn_subdomain = options.pop("secure_cdn_subdomain",
-                                       cloudinary.config().secure_cdn_subdomain)
-    cname = options.pop("cname", cloudinary.config().cname)
     shorten = options.pop("shorten", cloudinary.config().shorten)
 
-    cloud_name = options.pop("cloud_name", cloudinary.config().cloud_name or None)
-    if cloud_name is None:
-        raise ValueError("Must supply cloud_name in tag or in configuration")
-    secure = options.pop("secure", cloudinary.config().secure)
-    private_cdn = options.pop("private_cdn", cloudinary.config().private_cdn)
-    secure_distribution = options.pop("secure_distribution",
-                                      cloudinary.config().secure_distribution)
     sign_url = options.pop("sign_url", cloudinary.config().sign_url)
     api_secret = options.pop("api_secret", cloudinary.config().api_secret)
     url_suffix = options.pop("url_suffix", None)
@@ -785,9 +805,9 @@ def cloudinary_url(source, **options):
             base64.urlsafe_b64encode(
                 hash_fn(to_bytes(to_sign + api_secret)).digest())[0:chars_length]) + "--"
 
-    prefix = unsigned_download_url_prefix(
-        source, cloud_name, private_cdn, cdn_subdomain, secure_cdn_subdomain,
-        cname, secure, secure_distribution)
+    options["source"] = source
+    prefix = build_distribution_domain(options)
+
     source = "/".join(__compact(
         [prefix, resource_type, type, signature, transformation, version, source]))
     if sign_url and auth_token:
@@ -998,6 +1018,7 @@ def archive_params(**options):
         "skip_transformation_name": options.get("skip_transformation_name"),
         "tags": options.get("tags") and build_array(options.get("tags")),
         "target_format": options.get("target_format"),
+        "target_asset_folder": options.get("target_asset_folder"),
         "target_public_id": options.get("target_public_id"),
         "target_tags": options.get("target_tags") and build_array(options.get("target_tags")),
         "timestamp": timestamp,
@@ -1052,7 +1073,8 @@ def build_custom_headers(headers):
 
 
 def build_upload_params(**options):
-    params = {param_name: options.get(param_name) for param_name in __SIMPLE_UPLOAD_PARAMS}
+    params = {param_name: options.get(param_name) for param_name in __SIMPLE_UPLOAD_PARAMS if param_name in options}
+    params["upload_preset"] = params.pop("upload_preset", cloudinary.config().upload_preset)
 
     serialized_params = {
         "timestamp": now(),
@@ -1577,3 +1599,19 @@ def unique(collection, key=None):
         to_return[key(element)] = element
 
     return list(to_return.values())
+
+
+def fq_public_id(public_id, resource_type="image", type="upload"):
+    """
+    Returns the fully qualified public id of form resource_type/type/public_id.
+
+    :param public_id: The public ID of the asset.
+    :type public_id: str
+    :param resource_type: The type of the asset. Defaults to "image".
+    :type resource_type: str
+    :param type: The upload type. Defaults to "upload".
+    :type type: str
+
+    :return:
+    """
+    return "{resource_type}/{type}/{public_id}".format(resource_type=resource_type, type=type, public_id=public_id)

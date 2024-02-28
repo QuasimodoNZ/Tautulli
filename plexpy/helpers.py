@@ -28,11 +28,13 @@ from cloudinary.api import delete_resources_by_tag
 from cloudinary.uploader import upload
 from cloudinary.utils import cloudinary_url
 from collections import OrderedDict
-import datetime
+from datetime import date, datetime, timezone
 from functools import reduce, wraps
 import hashlib
 import imghdr
+from itertools import groupby
 from future.moves.itertools import islice, zip_longest
+from ipaddress import ip_address, ip_network, IPv4Address
 import ipwhois
 import ipwhois.exceptions
 import ipwhois.utils
@@ -220,14 +222,14 @@ def timestamp():
 
 
 def today():
-    today = datetime.date.today()
-    yyyymmdd = datetime.date.isoformat(today)
+    today = date.today()
+    yyyymmdd = date.isoformat(today)
 
     return yyyymmdd
 
 
 def utc_now_iso():
-    utcnow = datetime.datetime.utcnow()
+    utcnow = datetime.now(tz=timezone.utc).replace(tzinfo=None)
 
     return utcnow.isoformat()
 
@@ -244,7 +246,7 @@ def timestamp_to_YMDHMS(ts, sep=False):
 
 
 def timestamp_to_datetime(ts):
-    return datetime.datetime.fromtimestamp(ts)
+    return datetime.fromtimestamp(ts)
 
 
 def iso_to_YMD(iso):
@@ -256,7 +258,7 @@ def iso_to_datetime(iso):
 
 
 def datetime_to_iso(dt, to_date=False):
-    if isinstance(dt, datetime.datetime):
+    if isinstance(dt, datetime):
         if to_date:
             dt = dt.date()
         return dt.isoformat()
@@ -1192,18 +1194,20 @@ def get_plexpy_url(hostname=None):
         scheme = 'http'
 
     if hostname is None and plexpy.CONFIG.HTTP_HOST in ('0.0.0.0', '::'):
-        import socket
+        # Only returns IPv4 address
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        s.settimeout(0)
         try:
-            # Only returns IPv4 address
-            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-            s.connect(('<broadcast>', 0))
+            s.connect(('<broadcast>', 1))
             hostname = s.getsockname()[0]
         except socket.error:
             try:
                 hostname = socket.gethostbyname(socket.gethostname())
             except socket.gaierror:
                 pass
+        finally:
+            s.close()
 
         if not hostname:
             hostname = 'localhost'
@@ -1239,6 +1243,15 @@ def grouper(iterable, n, fillvalue=None):
     # grouper('ABCDEFG', 3, 'x') --> ABC DEF Gxx
     args = [iter(iterable)] * n
     return zip_longest(fillvalue=fillvalue, *args)
+
+
+def group_by_keys(iterable, keys):
+    if not isinstance(keys, (list, tuple)):
+        keys = [keys]
+
+    key_function = operator.itemgetter(*keys)
+    sorted_iterable = sorted(iterable, key=key_function)
+    return {key: list(group) for key, group in groupby(sorted_iterable, key_function)}
 
 
 def chunk(it, size):
@@ -1733,3 +1746,62 @@ def short_season(title):
     if title.startswith('Season ') and title[7:].isdigit():
         return 'S%s' % title[7:]
     return title
+
+
+def get_first_final_marker(markers):
+    first = None
+    final = None
+    for marker in markers:
+        if marker['first']:
+            first = marker
+        if marker['final']:
+            final = marker
+    return first, final
+
+
+def check_watched(media_type, view_offset, duration, marker_credits_first=None, marker_credits_final=None):
+    if isinstance(marker_credits_first, dict):
+        marker_credits_first = marker_credits_first['start_time_offset']
+    if isinstance(marker_credits_final, dict):
+        marker_credits_final = marker_credits_final['start_time_offset']
+
+    view_offset = cast_to_int(view_offset)
+    duration = cast_to_int(duration)
+
+    watched_percent = {
+        'movie': plexpy.CONFIG.MOVIE_WATCHED_PERCENT,
+        'episode': plexpy.CONFIG.TV_WATCHED_PERCENT,
+        'track': plexpy.CONFIG.MUSIC_WATCHED_PERCENT,
+        'clip': plexpy.CONFIG.TV_WATCHED_PERCENT
+    }
+    threshold = watched_percent.get(media_type, 0) / 100 * duration
+    if not threshold:
+        return False
+
+    if plexpy.CONFIG.WATCHED_MARKER == 1 and marker_credits_final:
+        return view_offset >= marker_credits_final
+    elif plexpy.CONFIG.WATCHED_MARKER == 2 and marker_credits_first:
+        return view_offset >= marker_credits_first
+    elif plexpy.CONFIG.WATCHED_MARKER == 3 and marker_credits_first:
+        return view_offset >= min(threshold, marker_credits_first)
+    else:
+        return view_offset >= threshold
+
+
+def pms_name():
+    return plexpy.CONFIG.PMS_NAME_OVERRIDE or plexpy.CONFIG.PMS_NAME
+
+
+def ip_type(ip: str) -> str:
+    try:
+        return "IPv4" if type(ip_address(ip)) is IPv4Address else "IPv6"
+    except ValueError:
+        return "Invalid"
+
+
+def get_ipv6_network_address(ip: str) -> str:
+    cidr = "/64"
+    cidr_pattern = re.compile(r'^/(1([0-1]\d|2[0-8]))$|^/(\d\d)$|^/[1-9]$')
+    if cidr_pattern.match(plexpy.CONFIG.NOTIFY_CONCURRENT_IPV6_CIDR):
+        cidr = plexpy.CONFIG.NOTIFY_CONCURRENT_IPV6_CIDR
+    return str(ip_network(ip+cidr, strict=False).network_address)
