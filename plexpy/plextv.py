@@ -48,7 +48,7 @@ def get_server_resources(return_presence=False, return_server=False, return_info
     if not return_presence and not return_info:
         logger.info("Tautulli PlexTV :: Requesting resources for server...")
 
-    server = {'pms_name': plexpy.CONFIG.PMS_NAME,
+    server = {'pms_name': helpers.pms_name(),
               'pms_version': plexpy.CONFIG.PMS_VERSION,
               'pms_platform': plexpy.CONFIG.PMS_PLATFORM,
               'pms_ip': plexpy.CONFIG.PMS_IP,
@@ -80,6 +80,7 @@ def get_server_resources(return_presence=False, return_server=False, return_info
                                                          port=server['pms_port'])
 
     plex_tv = PlexTV()
+    plex_tv.ping()
     result = plex_tv.get_server_connections(pms_identifier=server['pms_identifier'],
                                             pms_ip=server['pms_ip'],
                                             pms_port=server['pms_port'],
@@ -331,12 +332,27 @@ class PlexTV(object):
 
         return request
 
+    def get_public_ip(self, output_format=''):
+        uri = '/:/ip'
+        request = self.request_handler.make_request(uri=uri,
+                                                    request_type='GET',
+                                                    output_format=output_format)
+
+        return request
+
     def get_plextv_geoip(self, ip_address='', output_format=''):
         uri = '/api/v2/geoip?ip_address=%s' % ip_address
         request = self.request_handler.make_request(uri=uri,
                                                     request_type='GET',
                                                     output_format=output_format)
 
+        return request
+
+    def ping_plextv(self, output_format=''):
+        uri = '/api/v2/ping'
+        request = self.request_handler.make_request(uri=uri,
+                                                    request_type='GET',
+                                                    output_format=output_format)
         return request
 
     def get_full_users_list(self):
@@ -942,3 +958,18 @@ class PlexTV(object):
                         }
 
             return geo_info
+
+    def ping(self):
+        logger.info(u"Tautulli PlexTV :: Pinging Plex.tv to refresh token.")
+
+        pong = self.ping_plextv(output_format='xml')
+
+        try:
+            xml_head = pong.getElementsByTagName('pong')
+        except Exception as e:
+            logger.warn(u"Tautulli PlexTV :: Unable to parse XML for ping: %s." % e)
+            return None
+        
+        if xml_head:
+            return helpers.bool_true(xml_head[0].firstChild.nodeValue)
+        return False

@@ -155,6 +155,26 @@ def resources_by_context(key, value=None, **options):
     return call_api("get", uri, params, **options)
 
 
+def visual_search(image_url=None, image_asset_id=None, text=None, **options):
+    """
+    Find images based on their visual content.
+
+    :param image_url:       The URL of an image.
+    :type image_url:        str
+    :param image_asset_id:  The asset_id of an image in your account.
+    :type image_asset_id:   str
+    :param text:            A textual description, e.g., "cat"
+    :type text:             str
+    :param options:         Additional options
+    :type options:          dict, optional
+    :return:                Resources (assets) that were found
+    :rtype:                 Response
+    """
+    uri = ["resources", "visual_search"]
+    params = {"image_url": image_url, "image_asset_id": image_asset_id, "text": text}
+    return call_api("get", uri, params, **options)
+
+
 def resource(public_id, **options):
     resource_type = options.pop("resource_type", "image")
     upload_type = options.pop("type", "upload")
@@ -188,9 +208,9 @@ def _prepare_asset_details_params(**options):
 
     :internal
     """
-    return only(options, "exif", "faces", "colors", "image_metadata", "cinemagraph_analysis",
+    return only(options, "exif", "faces", "colors", "image_metadata", "media_metadata", "cinemagraph_analysis",
                 "pages", "phash", "coordinates", "max_results", "quality_analysis", "derived_next_cursor",
-                "accessibility_analysis", "versions")
+                "accessibility_analysis", "versions", "related", "related_next_cursor")
 
 
 def update(public_id, **options):
@@ -223,6 +243,8 @@ def update(public_id, **options):
         params["display_name"] = options.get("display_name")
     if "unique_display_name" in options:
         params["unique_display_name"] = options.get("unique_display_name")
+    if "clear_invalid" in options:
+        params["clear_invalid"] = options.get("clear_invalid")
 
     return call_api("post", uri, params, **options)
 
@@ -291,6 +313,86 @@ def delete_derived_by_transformation(public_ids, transformations,
     if invalidate is not None:
         params['invalidate'] = invalidate
     return call_api("delete", uri, params, **options)
+
+
+def add_related_assets(public_id, assets_to_relate, resource_type="image", type="upload", **options):
+    """
+    Relates an asset to other assets by public IDs.
+
+    :param public_id: The public ID of the asset to update.
+    :type public_id: str
+    :param assets_to_relate: The array of up to 10 fully_qualified_public_ids given as resource_type/type/public_id.
+    :type assets_to_relate: list[str]
+    :param type: The upload type. Defaults to "upload".
+    :type type: str
+    :param resource_type: The type of the resource. Defaults to "image".
+    :type resource_type: str
+    :param options: Additional options.
+    :type options: dict, optional
+    :return: The result of the command.
+    :rtype: dict
+    """
+    uri = ["resources", "related_assets", resource_type, type, public_id]
+    params = {"assets_to_relate": utils.build_array(assets_to_relate)}
+    return call_json_api("post", uri, params, **options)
+
+
+def add_related_assets_by_asset_ids(asset_id, assets_to_relate, **options):
+    """
+    Relates an asset to other assets by asset IDs.
+
+    :param asset_id: The asset ID of the asset to update.
+    :type asset_id: str
+    :param assets_to_relate: The array of up to 10 asset IDs.
+    :type assets_to_relate: list[str]
+    :param options: Additional options.
+    :type options: dict, optional
+    :return: The result of the command.
+    :rtype: dict
+    """
+    uri = ["resources", "related_assets", asset_id]
+    params = {"assets_to_relate": utils.build_array(assets_to_relate)}
+    return call_json_api("post", uri, params, **options)
+
+
+def delete_related_assets(public_id, assets_to_unrelate, resource_type="image", type="upload", **options):
+    """
+    Unrelates an asset from other assets by public IDs.
+
+    :param public_id: The public ID of the asset to update.
+    :type public_id: str
+    :param assets_to_unrelate: The array of up to 10 fully_qualified_public_ids given as resource_type/type/public_id.
+    :type assets_to_unrelate: list[str]
+    :param type: The upload type.
+    :type type: str
+    :param resource_type: The type of the resource: defaults to "image".
+    :type resource_type: str
+    :param options: Additional options.
+    :type options: dict, optional
+    :return: The result of the command.
+    :rtype: dict
+    """
+    uri = ["resources", "related_assets", resource_type, type, public_id]
+    params = {"assets_to_unrelate": utils.build_array(assets_to_unrelate)}
+    return call_json_api("delete", uri, params, **options)
+
+
+def delete_related_assets_by_asset_ids(asset_id, assets_to_unrelate, **options):
+    """
+    Unrelates an asset from other assets by asset IDs.
+
+    :param asset_id: The asset ID of the asset to update.
+    :type asset_id: str
+    :param assets_to_unrelate: The array of up to 10 asset IDs.
+    :type assets_to_unrelate: list[str]
+    :param options: Additional options.
+    :type options: dict, optional
+    :return: The result of the command.
+    :rtype: dict
+    """
+    uri = ["resources", "related_assets", asset_id]
+    params = {"assets_to_unrelate": utils.build_array(assets_to_unrelate)}
+    return call_json_api("delete", uri, params, **options)
 
 
 def tags(**options):
