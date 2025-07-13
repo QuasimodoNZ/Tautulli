@@ -26,6 +26,7 @@ class Media(PlexObject):
             height (int): The height of the media in pixels (ex: 256).
             id (int): The unique ID for this media on the server.
             has64bitOffsets (bool): True if video has 64 bit offsets.
+            hasVoiceActivity (bool): True if video has voice activity analyzed.
             optimizedForStreaming (bool): True if video is optimized for streaming.
             parts (List<:class:`~plexapi.media.MediaPart`>): List of media part objects.
             proxyType (int): Equals 42 for optimized versions.
@@ -37,7 +38,7 @@ class Media(PlexObject):
             videoResolution (str): The video resolution of the media (ex: sd).
             width (int): The width of the video in pixels (ex: 608).
 
-            <Photo_only_attributes>: The following attributes are only available for photos.
+            Photo_only_attributes: The following attributes are only available for photos.
 
                 * aperture (str): The aperture used to take the photo.
                 * exposure (str): The exposure used to take the photo.
@@ -61,6 +62,7 @@ class Media(PlexObject):
         self.height = utils.cast(int, data.attrib.get('height'))
         self.id = utils.cast(int, data.attrib.get('id'))
         self.has64bitOffsets = utils.cast(bool, data.attrib.get('has64bitOffsets'))
+        self.hasVoiceActivity = utils.cast(bool, data.attrib.get('hasVoiceActivity', '0'))
         self.optimizedForStreaming = utils.cast(bool, data.attrib.get('optimizedForStreaming'))
         self.parts = self.findItems(data, MediaPart)
         self.proxyType = utils.cast(int, data.attrib.get('proxyType'))
@@ -74,13 +76,13 @@ class Media(PlexObject):
         self.width = utils.cast(int, data.attrib.get('width'))
         self.uuid = data.attrib.get('uuid')
 
-        if self._isChildOf(etag='Photo'):
-            self.aperture = data.attrib.get('aperture')
-            self.exposure = data.attrib.get('exposure')
-            self.iso = utils.cast(int, data.attrib.get('iso'))
-            self.lens = data.attrib.get('lens')
-            self.make = data.attrib.get('make')
-            self.model = data.attrib.get('model')
+        # Photo only attributes
+        self.aperture = data.attrib.get('aperture')
+        self.exposure = data.attrib.get('exposure')
+        self.iso = utils.cast(int, data.attrib.get('iso'))
+        self.lens = data.attrib.get('lens')
+        self.make = data.attrib.get('make')
+        self.model = data.attrib.get('model')
 
         parent = self._parent()
         self._parentKey = parent.key
@@ -106,12 +108,16 @@ class MediaPart(PlexObject):
         Attributes:
             TAG (str): 'Part'
             accessible (bool): True if the file is accessible.
+                Requires reloading the media with ``checkFiles=True``.
+                Refer to :func:`~plexapi.base.PlexObject.reload`.
             audioProfile (str): The audio profile of the file.
             container (str): The container type of the file (ex: avi).
             decision (str): Unknown.
             deepAnalysisVersion (int): The Plex deep analysis version for the file.
             duration (int): The duration of the file in milliseconds.
             exists (bool): True if the file exists.
+                Requires reloading the media with ``checkFiles=True``.
+                Refer to :func:`~plexapi.base.PlexObject.reload`.
             file (str): The path to this file on disk (ex: /media/Movies/Cars (2006)/Cars (2006).mkv)
             has64bitOffsets (bool): True if the file has 64 bit offsets.
             hasThumbnail (bool): True if the file (track) has an embedded thumbnail.
@@ -158,11 +164,8 @@ class MediaPart(PlexObject):
         self.videoProfile = data.attrib.get('videoProfile')
 
     def _buildStreams(self, data):
-        streams = []
-        for cls in (VideoStream, AudioStream, SubtitleStream, LyricStream):
-            items = self.findItems(data, cls, streamType=cls.STREAMTYPE)
-            streams.extend(items)
-        return streams
+        """ Returns a list of :class:`~plexapi.media.MediaPartStream` objects in this MediaPart. """
+        return self.findItems(data)
 
     @property
     def hasPreviewThumbnails(self):
@@ -216,7 +219,7 @@ class MediaPart(PlexObject):
         else:
             params['subtitleStreamID'] = stream
 
-        self._server.query(key, method=self._server._session.put)
+        self._server.query(key, method=self._server._session.put, params=params)
         return self
 
     def resetSelectedSubtitleStream(self):
@@ -384,7 +387,7 @@ class AudioStream(MediaPartStream):
             samplingRate (int): The sampling rate of the audio stream (ex: xxx)
             streamIdentifier (int): The stream identifier of the audio stream.
 
-            <Track_only_attributes>: The following attributes are only available for tracks.
+            Track_only_attributes: The following attributes are only available for tracks.
 
                 * albumGain (float): The gain for the album.
                 * albumPeak (float): The peak for the album.
@@ -411,16 +414,16 @@ class AudioStream(MediaPartStream):
         self.samplingRate = utils.cast(int, data.attrib.get('samplingRate'))
         self.streamIdentifier = utils.cast(int, data.attrib.get('streamIdentifier'))
 
-        if self._isChildOf(etag='Track'):
-            self.albumGain = utils.cast(float, data.attrib.get('albumGain'))
-            self.albumPeak = utils.cast(float, data.attrib.get('albumPeak'))
-            self.albumRange = utils.cast(float, data.attrib.get('albumRange'))
-            self.endRamp = data.attrib.get('endRamp')
-            self.gain = utils.cast(float, data.attrib.get('gain'))
-            self.loudness = utils.cast(float, data.attrib.get('loudness'))
-            self.lra = utils.cast(float, data.attrib.get('lra'))
-            self.peak = utils.cast(float, data.attrib.get('peak'))
-            self.startRamp = data.attrib.get('startRamp')
+        # Track only attributes
+        self.albumGain = utils.cast(float, data.attrib.get('albumGain'))
+        self.albumPeak = utils.cast(float, data.attrib.get('albumPeak'))
+        self.albumRange = utils.cast(float, data.attrib.get('albumRange'))
+        self.endRamp = data.attrib.get('endRamp')
+        self.gain = utils.cast(float, data.attrib.get('gain'))
+        self.loudness = utils.cast(float, data.attrib.get('loudness'))
+        self.lra = utils.cast(float, data.attrib.get('lra'))
+        self.peak = utils.cast(float, data.attrib.get('peak'))
+        self.startRamp = data.attrib.get('startRamp')
 
     def setSelected(self):
         """ Sets this audio stream as the selected audio stream.
@@ -440,12 +443,15 @@ class SubtitleStream(MediaPartStream):
         Attributes:
             TAG (str): 'Stream'
             STREAMTYPE (int): 3
+            canAutoSync (bool): True if the subtitle stream can be auto synced.
             container (str): The container of the subtitle stream.
             forced (bool): True if this is a forced subtitle.
             format (str): The format of the subtitle stream (ex: srt).
             headerCompression (str): The header compression of the subtitle stream.
+            hearingImpaired (bool): True if this is a hearing impaired (SDH) subtitle.
+            perfectMatch (bool): True if the on-demand subtitle is a perfect match.
             providerTitle (str): The provider title where the on-demand subtitle is downloaded from.
-            score (int): The match score of the on-demand subtitle.
+            score (int): The match score (download count) of the on-demand subtitle.
             sourceKey (str): The source key of the on-demand subtitle.
             transient (str): Unknown.
             userID (int): The user id of the user that downloaded the on-demand subtitle.
@@ -456,10 +462,13 @@ class SubtitleStream(MediaPartStream):
     def _loadData(self, data):
         """ Load attribute values from Plex XML response. """
         super(SubtitleStream, self)._loadData(data)
+        self.canAutoSync = utils.cast(bool, data.attrib.get('canAutoSync'))
         self.container = data.attrib.get('container')
         self.forced = utils.cast(bool, data.attrib.get('forced', '0'))
         self.format = data.attrib.get('format')
         self.headerCompression = data.attrib.get('headerCompression')
+        self.hearingImpaired = utils.cast(bool, data.attrib.get('hearingImpaired', '0'))
+        self.perfectMatch = utils.cast(bool, data.attrib.get('perfectMatch'))
         self.providerTitle = data.attrib.get('providerTitle')
         self.score = utils.cast(int, data.attrib.get('score'))
         self.sourceKey = data.attrib.get('sourceKey')
@@ -477,6 +486,7 @@ class SubtitleStream(MediaPartStream):
         return self.setSelected()
 
 
+@utils.registerPlexObject
 class LyricStream(MediaPartStream):
     """ Represents a lyric stream within a :class:`~plexapi.media.MediaPart`.
 
@@ -949,6 +959,26 @@ class Guid(PlexObject):
 
 
 @utils.registerPlexObject
+class Image(PlexObject):
+    """ Represents a single Image media tag.
+
+        Attributes:
+            TAG (str): 'Image'
+            alt (str): The alt text for the image.
+            type (str): The type of image (e.g. coverPoster, background, snapshot).
+            url (str): The API URL (/library/metadata/<ratingKey>/thumb/<thumbid>).
+    """
+    TAG = 'Image'
+
+    def _loadData(self, data):
+        """ Load attribute values from Plex XML response. """
+        self._data = data
+        self.alt = data.attrib.get('alt')
+        self.type = data.attrib.get('type')
+        self.url = data.attrib.get('url')
+
+
+@utils.registerPlexObject
 class Rating(PlexObject):
     """ Represents a single Rating media tag.
 
@@ -997,13 +1027,36 @@ class Review(PlexObject):
         self.text = data.attrib.get('text')
 
 
+@utils.registerPlexObject
+class UltraBlurColors(PlexObject):
+    """ Represents a single UltraBlurColors media tag.
+
+        Attributes:
+            TAG (str): 'UltraBlurColors'
+            bottomLeft (str): The bottom left hex color.
+            bottomRight (str): The bottom right hex color.
+            topLeft (str): The top left hex color.
+            topRight (str): The top right hex color.
+    """
+    TAG = 'UltraBlurColors'
+
+    def _loadData(self, data):
+        """ Load attribute values from Plex XML response. """
+        self._data = data
+        self.bottomLeft = data.attrib.get('bottomLeft')
+        self.bottomRight = data.attrib.get('bottomRight')
+        self.topLeft = data.attrib.get('topLeft')
+        self.topRight = data.attrib.get('topRight')
+
+
 class BaseResource(PlexObject):
     """ Base class for all Art, Poster, and Theme objects.
 
         Attributes:
             TAG (str): 'Photo' or 'Track'
             key (str): API URL (/library/metadata/<ratingkey>).
-            provider (str): The source of the art or poster, None for Theme objects.
+            provider (str): The source of the resource. 'local' for local files (e.g. theme.mp3),
+                None if uploaded or agent-/plugin-supplied.
             ratingKey (str): Unique key identifying the resource.
             selected (bool): True if the resource is currently selected.
             thumb (str): The URL to retrieve the resource thumbnail.
@@ -1042,6 +1095,11 @@ class BaseResource(PlexObject):
 
 class Art(BaseResource):
     """ Represents a single Art object. """
+    TAG = 'Photo'
+
+
+class Logo(BaseResource):
+    """ Represents a single Logo object. """
     TAG = 'Photo'
 
 

@@ -15,17 +15,11 @@
 #  You should have received a copy of the GNU General Public License
 #  along with Tautulli.  If not, see <http://www.gnu.org/licenses/>.
 
-from __future__ import unicode_literals
-
 import distro
 import platform
 from collections import OrderedDict
 
-import plexpy
-if plexpy.PYTHON2:
-    import version
-else:
-    from plexpy import version
+from plexpy import version
 
 
 # Identify Our Application
@@ -108,7 +102,8 @@ PLATFORM_NAME_OVERRIDES = {
     'Mystery 5': 'Xbox 360',
     'WebMAF': 'Playstation 4',
     'windows': 'Windows',
-    'osx': 'macOS'
+    'osx': 'macOS',
+    'macos': 'macOS',
 }
 
 PMS_PLATFORM_NAME_OVERRIDES = {
@@ -175,6 +170,7 @@ AUDIO_CODEC_OVERRIDES = {
 
 VIDEO_RESOLUTION_OVERRIDES = {
     'sd': 'SD',
+    '2k': '2k',
     '4k': '4k'
 }
 
@@ -243,7 +239,7 @@ EXTRA_TYPES = {
 }
 
 SCHEDULER_LIST = [
-    ('Check GitHub for updates', 'websocket'),
+    ('Check GitHub for updates', 'scheduled'),
     ('Check for server response', 'websocket'),
     ('Check for active sessions', 'websocket'),
     ('Check for recently added items', 'websocket'),
@@ -381,6 +377,8 @@ NOTIFICATION_PARAMETERS = [
         'category': 'Stream Details',
         'parameters': [
              {'name': 'Streams', 'type': 'int', 'value': 'streams', 'description': 'The total number of concurrent streams.'},
+             {'name': 'LAN Streams', 'type': 'int', 'value': 'lan_streams', 'description': 'The total number of concurrent LAN streams.'},
+             {'name': 'WAN Streams', 'type': 'int', 'value': 'wan_streams', 'description': 'The total number of concurrent WAN streams.'},
              {'name': 'Direct Plays', 'type': 'int', 'value': 'direct_plays', 'description': 'The total number of concurrent direct plays.'},
              {'name': 'Direct Streams', 'type': 'int', 'value': 'direct_streams', 'description': 'The total number of concurrent direct streams.'},
              {'name': 'Transcodes', 'type': 'int', 'value': 'transcodes', 'description': 'The total number of concurrent transcodes.'},
@@ -397,7 +395,9 @@ NOTIFICATION_PARAMETERS = [
              {'name': 'User Thumb', 'type': 'str', 'value': 'user_thumb', 'description': 'The profile picture URL of the user streaming.'},
              {'name': 'Device', 'type': 'str', 'value': 'device', 'description': 'The type of client device being used for playback.'},
              {'name': 'Platform', 'type': 'str', 'value': 'platform', 'description': 'The type of client platform being used for playback.'},
+             {'name': 'Platform Version', 'type': 'str', 'value': 'platform_version', 'description': 'The version number of the client platform being used for playback.'},
              {'name': 'Product', 'type': 'str', 'value': 'product', 'description': 'The type of client product being used for playback.'},
+             {'name': 'Product Version', 'type': 'str', 'value': 'product_version', 'description': 'The version number of client product being used for playback.'},
              {'name': 'Player', 'type': 'str', 'value': 'player', 'description': 'The name of the player being used for playback.'},
              {'name': 'Initial Stream', 'type': 'int', 'value': 'initial_stream', 'description': 'If the stream is the initial stream of a continuous streaming session.', 'example': '0 or 1'},
              {'name': 'IP Address', 'type': 'str', 'value': 'ip_address', 'description': 'The IP address of the device being used for playback.'},
@@ -433,8 +433,11 @@ NOTIFICATION_PARAMETERS = [
              {'name': 'Credits Marker First', 'type': 'int', 'value': 'credits_marker_first', 'description': 'If the marker is the first credits marker.', 'example': '0 or 1'},
              {'name': 'Credits Marker Final', 'type': 'int', 'value': 'credits_marker_final', 'description': 'If the marker is the final credits marker.', 'example': '0 or 1'},
              {'name': 'Channel Call Sign', 'type': 'str', 'value': 'channel_call_sign', 'description': 'The Live TV channel call sign.'},
-             {'name': 'Channel Identifier', 'type': 'str', 'value': 'channel_identifier', 'description': 'The Live TV channel number.'},
+             {'name': 'Channel ID', 'type': 'str', 'value': 'channel_id', 'description': 'The Live TV channel number.'},
+             {'name': 'Channel Identifier', 'type': 'str', 'value': 'channel_identifier', 'description': 'The Live TV channel identifier.'},
+             {'name': 'Channel Title', 'type': 'str', 'value': 'channel_title', 'description': 'The Live TV channel title.'},
              {'name': 'Channel Thumb', 'type': 'str', 'value': 'channel_thumb', 'description': 'The URL for the Live TV channel logo.'},
+             {'name': 'Channel VCN', 'type': 'str', 'value': 'channel_title', 'description': 'The Live TV tuner channel number.'},
              {'name': 'Secure', 'type': 'int', 'value': 'secure', 'description': 'If the stream is using a secure connection.', 'example': '0 or 1'},
              {'name': 'Relayed', 'type': 'int', 'value': 'relayed', 'description': 'If the stream is using Plex Relay.', 'example': '0 or 1'},
              {'name': 'Stream Local', 'type': 'int', 'value': 'stream_local', 'description': 'If the stream is local.', 'example': '0 or 1'},
@@ -453,6 +456,9 @@ NOTIFICATION_PARAMETERS = [
              {'name': 'Stream Video Color Space', 'type': 'str', 'value': 'stream_video_color_space', 'description': 'The video color space of the stream.'},
              {'name': 'Stream Video Color Transfer Function', 'type': 'str', 'value': 'stream_video_color_trc', 'description': 'The video transfer function of the stream.'},
              {'name': 'Stream Video Dynamic Range', 'type': 'str', 'value': 'stream_video_dynamic_range', 'description': 'The video dynamic range of the stream.', 'example': 'HDR or SDR'},
+             {'name': 'Stream Video DOVI Present', 'type': 'int', 'value': 'stream_video_dovi_present', 'description': 'If Dolby Vision is present in the stream.', 'example': '0 or 1'},
+             {'name': 'Stream Video DOVI Level', 'type': 'int', 'value': 'stream_video_dovi_level', 'description': 'The Dolby Vision level of the stream.'},
+             {'name': 'Stream Video DOVI Profile', 'type': 'int', 'value': 'stream_video_dovi_profile', 'description': 'The Dolby Vision profile of the stream.',},
              {'name': 'Stream Video Framerate', 'type': 'str', 'value': 'stream_video_framerate', 'description': 'The video framerate of the stream.'},
              {'name': 'Stream Video Full Resolution', 'type': 'str', 'value': 'stream_video_full_resolution', 'description': 'The video resolution of the stream with scan type.'},
              {'name': 'Stream Video Ref Frames', 'type': 'int', 'value': 'stream_video_ref_frames', 'description': 'The video reference frames of the stream.'},
@@ -470,6 +476,7 @@ NOTIFICATION_PARAMETERS = [
              {'name': 'Stream Audio Sample Rate', 'type': 'int', 'value': 'stream_audio_sample_rate', 'description': 'The audio sample rate (in Hz) of the stream.'},
              {'name': 'Stream Audio Language', 'type': 'str', 'value': 'stream_audio_language', 'description': 'The audio language of the stream.'},
              {'name': 'Stream Audio Language Code', 'type': 'str', 'value': 'stream_audio_language_code', 'description': 'The audio language code of the stream.'},
+             {'name': 'Stream Audio Profile', 'type': 'str', 'value': 'stream_audio_profile', 'description': 'The audio profile of the stream.'},
              {'name': 'Stream Subtitle Codec', 'type': 'str', 'value': 'stream_subtitle_codec', 'description': 'The subtitle codec of the stream.'},
              {'name': 'Stream Subtitle Container', 'type': 'str', 'value': 'stream_subtitle_container', 'description': 'The subtitle container of the stream.'},
              {'name': 'Stream Subtitle Format', 'type': 'str', 'value': 'stream_subtitle_format', 'description': 'The subtitle format of the stream.'},
@@ -551,6 +558,8 @@ NOTIFICATION_PARAMETERS = [
              {'name': 'Poster URL', 'type': 'str', 'value': 'poster_url', 'description': 'A URL for the movie, TV show, or album poster.'},
              {'name': 'Plex ID', 'type': 'str', 'value': 'plex_id', 'description': 'The Plex ID for the item.', 'example': 'e.g. 5d7769a9594b2b001e6a6b7e'},
              {'name': 'Plex URL', 'type': 'str', 'value': 'plex_url', 'description': 'The Plex URL to your server for the item.'},
+             {'name': 'Plex Slug', 'type': 'str', 'value': 'plex_slug', 'description': 'The Plex URL slug for the item.'},
+             {'name': 'Plex Watch URL', 'type': 'str', 'value': 'plex_watch_url', 'description': 'The Plex URL to watch.plex.tv for the item.'},
              {'name': 'IMDB ID', 'type': 'str', 'value': 'imdb_id', 'description': 'The IMDB ID for the movie or TV show.', 'example': 'e.g. tt2488496'},
              {'name': 'IMDB URL', 'type': 'str', 'value': 'imdb_url', 'description': 'The IMDB URL for the movie or TV show.'},
              {'name': 'TVDB ID', 'type': 'int', 'value': 'thetvdb_id', 'description': 'The TVDB ID for the movie or TV show.', 'example': 'e.g. 121361'},
@@ -578,6 +587,9 @@ NOTIFICATION_PARAMETERS = [
              {'name': 'Video Color Space', 'type': 'str', 'value': 'video_color_space', 'description': 'The video color space of the original media.'},
              {'name': 'Video Color Transfer Function', 'type': 'str', 'value': 'video_color_trc', 'description': 'The video transfer function of the original media.'},
              {'name': 'Video Dynamic Range', 'type': 'str', 'value': 'video_dynamic_range', 'description': 'The video dynamic range of the original media.', 'example': 'HDR or SDR'},
+             {'name': 'Video DOVI Present', 'type': 'int', 'value': 'video_dovi_present', 'description': 'If Dolby Vision is present in the original media.', 'example': '0 or 1'},
+             {'name': 'Video DOVI Level', 'type': 'int', 'value': 'video_dovi_level', 'description': 'The Dolby Vision level of the original media.'},
+             {'name': 'Video DOVI Profile', 'type': 'int', 'value': 'video_dovi_profile', 'description': 'The Dolby Vision profile of the original media.',},
              {'name': 'Video Framerate', 'type': 'str', 'value': 'video_framerate', 'description': 'The video framerate of the original media.'},
              {'name': 'Video Full Resolution', 'type': 'str', 'value': 'video_full_resolution', 'description': 'The video resolution of the original media with scan type.'},
              {'name': 'Video Ref Frames', 'type': 'int', 'value': 'video_ref_frames', 'description': 'The video reference frames of the original media.'},
@@ -595,6 +607,7 @@ NOTIFICATION_PARAMETERS = [
              {'name': 'Audio Sample Rate', 'type': 'int', 'value': 'audio_sample_rate', 'description': 'The audio sample rate (in Hz) of the original media.'},
              {'name': 'Audio Language', 'type': 'str', 'value': 'audio_language', 'description': 'The audio language of the original media.'},
              {'name': 'Audio Language Code', 'type': 'str', 'value': 'audio_language_code', 'description': 'The audio language code of the original media.'},
+             {'name': 'Audio Profile', 'type': 'str', 'value': 'audio_profile', 'description': 'The audio profile of the original media.'},
              {'name': 'Subtitle Codec', 'type': 'str', 'value': 'subtitle_codec', 'description': 'The subtitle codec of the original media.'},
              {'name': 'Subtitle Container', 'type': 'str', 'value': 'subtitle_container', 'description': 'The subtitle container of the original media.'},
              {'name': 'Subtitle Format', 'type': 'str', 'value': 'subtitle_format', 'description': 'The subtitle format of the original media.'},

@@ -1,5 +1,147 @@
 # Changelog
 
+## v2.15.2 (2025-04-12)
+
+* Activity:
+  * New: Added link to library by clicking media type icon.
+  * New: Added stream count to tab title on homepage. (#2517)
+* History:
+  * Fix: Check stream watched status before stream stopped status. (#2506)
+* Notifications:
+  * Fix: ntfy notifications failing to send if provider link is blank.
+  * Fix: Check Pushover notification attachment is under 5MB limit. (#2396)
+  * Fix: Track URLs redirecting to the correct media page. (#2513)
+  * New: Added audio profile notification parameters.
+  * New: Added PATCH method for Webhook notifications.
+* Graphs:
+  * New: Added Total line to daily streams graph. (Thanks @zdimension) (#2497)
+* UI:
+  * Fix: Do not redirect API requests to the login page. (#2490)
+  * Change: Swap source and stream columns in stream info modal.
+* Other:
+  * Fix: Various typos. (Thanks @luzpaz) (#2520)
+  * Fix: CherryPy CORS response header not being set correctly. (#2279)
+
+
+## v2.15.1 (2025-01-11)
+
+* Activity:
+  * Fix: Detection of HDR transcodes. (Thanks @cdecker08) (#2412, #2466)
+* Newsletters:
+  * Fix: Disable basic authentication for /newsletter and /image endpoints. (#2472)
+* Exporter:
+  * New: Added logos to season and episode exports.
+* Other:
+  * Fix: Docker container https health check.
+
+
+## v2.15.0 (2024-11-24)
+
+* Notes:
+  * Support for Python 3.8 has been dropped. The minimum Python version is now 3.9.
+* Notifications:
+  * New: Allow Telegram blockquote and tg-emoji HTML tags. (Thanks @MythodeaLoL) (#2427)
+  * New: Added Plex slug and Plex Watch URL notification parameters. (#2420)
+  * Change: Update OneSignal API calls to use the new API endpoint for Tautulli Remote App notifications.
+* Newsletters:
+  * Fix: Dumping custom dates in raw newsletter json.
+* History:
+  * Fix: Unable to fix match for artists. (#2429)
+* Exporter:
+  * New: Added movie and episode hasVoiceActivity attribute to exporter fields.
+  * New: Added subtitle canAutoSync attribute to exporter fields.
+  * New: Added logos to the exporter fields.
+* UI:
+  * New: Add friendly name to the top bar of config modals. (Thanks @peagravel) (#2432)
+* API:
+  * New: Added plex slugs to metadata in the get_metadata API command.
+* Other:
+  * Fix: Tautulli failing to start with Python 3.13. (#2426)
+
+
+## v2.14.6 (2024-10-12)
+
+* Newsletters:
+  * Fix: Allow formatting newsletter date parameters.
+  * Change: Support apscheduler compatible cron expressions.
+* UI:
+  * Fix: Round runtime before converting to human duration.
+  * Fix: Make recently added/watched rows touch scrollable.
+* Other:
+  * Fix: Auto-updater not running.
+
+
+## v2.14.5 (2024-09-20)
+
+* Activity:
+  * Fix: Display of 2k resolution on activity card.
+* Notifications:
+  * Fix: ntfy notifications with special characters failing to send.
+* Other:
+  * Fix: Memory leak with database closing. (#2404)
+
+
+## v2.14.4 (2024-08-10)
+
+* Notifications:
+  * Fix: Update Slack notification info card.
+  * New: Added ntfy notification agent. (Thanks @nwithan8) (#2356, #2000)
+* UI:
+  * Fix: macOS platform capitalization.
+* Other:
+  * Fix: Remove deprecated getdefaultlocale. (Thanks @teodorstelian) (#2364, #2345)
+
+
+## v2.14.3 (2024-06-19)
+
+* Graphs:
+  * Fix: History table not loading when clicking on the graphs in some instances.
+* UI:
+  * Fix: Scheduled tasks table not loading when certain tasks are disabled.
+  * Removed: Unnecessary Remote Server checkbox from the settings page.
+* Other:
+  * Fix: Webserver not restarting after the setup wizard.
+  * Fix: Workaround webserver crashing in some instances.
+
+
+## v2.14.2 (2024-05-18)
+
+* History:
+  * Fix: Live TV activity not logging to history.
+  * Fix: Incorrect grouping of live TV history.
+* Notifications:
+  * Fix: Pushover configuration settings refreshing after entering a token.
+  * Fix: Plex remote access down notifications not triggering.
+  * Fix: Deleting all images from Cloudinary only deleting 1000 images.
+  * New: Added platform version and product version notification parameters. (#2244)
+  * New: Added LAN streams and WAN streams notification parameters. (#2276)
+  * New: Added Dolby Vision notification parameters. (#2240)
+  * New: Added live TV channel notification parameters.
+  * Change: Improved Tautulli Remote App notification encryption method.
+    * Note: Requires Tautulli Remote App version 3.2.4.
+* Exporter:
+  * New: Added slug attribute to exporter fields.
+  * New: Added track genres to exporter fields.
+  * New: Added playlist source URI to exporter fields.
+  * New: Added artProvider and thumbProvider to exporter fields.
+* UI:
+  * Fix: Mask deleted usernames in the logs.
+  * Fix: Live TV watch stats not showing on the media info page.
+  * Fix: Users without access to Plex server not showing as inactive.
+  * Removed: Deprecated synced item pages.
+  * Removed: Anonymous redirect settings. Links now use browser no-referrer policy instead.
+* API:
+  * New: Added Dolby Vision info to the get_metadata API command.
+  * New: Added before and after parameters to the get_home_stats API command. (#2231)
+* Packages:
+  * New: Universal binary for macOS for Apple silicon.
+  * New: Bump Snap package to core22.
+* Other:
+  * Change: Login cookie expires changed to max-age.
+  * Change: Improved key generation for login password. It is recommended to reenter your HTTP Password in the settings after upgrading.
+  * Removed: Python 2 compatibility code. (#2098, #2226) (Thanks @zdimension)
+
+
 ## v2.13.4 (2023-12-07)
 
 * UI:

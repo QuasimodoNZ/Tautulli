@@ -15,21 +15,12 @@
 #  You should have received a copy of the GNU General Public License
 #  along with Tautulli.  If not, see <http://www.gnu.org/licenses/>.
 
-from __future__ import unicode_literals
-from future.builtins import str
-
 import requests
 import threading
 
-import plexpy
-if plexpy.PYTHON2:
-    import database
-    import helpers
-    import logger
-else:
-    from plexpy import database
-    from plexpy import helpers
-    from plexpy import logger
+from plexpy import database
+from plexpy import helpers
+from plexpy import logger
 
 
 _ONESIGNAL_APP_ID = '3b4b666a-d557-4b92-acdf-e2c8c4b95357'
@@ -141,7 +132,7 @@ def set_mobile_device_config(mobile_device_id=None, **kwargs):
     if str(mobile_device_id).isdigit():
         mobile_device_id = int(mobile_device_id)
     else:
-        logger.error("Tautulli MobileApp :: Unable to set exisiting mobile device: invalid mobile_device_id %s." % mobile_device_id)
+        logger.error("Tautulli MobileApp :: Unable to set existing mobile device: invalid mobile_device_id %s." % mobile_device_id)
         return False
 
     keys = {'id': mobile_device_id}
@@ -207,11 +198,10 @@ def validate_onesignal_id(onesignal_id):
         return 2
 
     headers = {'Content-Type': 'application/json'}
-    params = {'app_id': _ONESIGNAL_APP_ID}
 
     logger.info("Tautulli MobileApp :: Validating OneSignal ID")
     try:
-        r = requests.get('https://onesignal.com/api/v1/players/{}'.format(onesignal_id), headers=headers, params=params)
+        r = requests.get(f'https://api.onesignal.com/apps/{_ONESIGNAL_APP_ID}/subscriptions/{onesignal_id}/user/identity', headers=headers)
         status_code = r.status_code
         logger.info("Tautulli MobileApp :: OneSignal ID validation returned status code %s", status_code)
         return int(status_code == 200)

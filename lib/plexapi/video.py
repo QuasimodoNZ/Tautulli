@@ -9,7 +9,7 @@ from plexapi.base import Playable, PlexPartialObject, PlexHistory, PlexSession
 from plexapi.exceptions import BadRequest
 from plexapi.mixins import (
     AdvancedSettingsMixin, SplitMergeMixin, UnmatchMatchMixin, ExtrasMixin, HubsMixin, PlayedUnplayedMixin, RatingMixin,
-    ArtUrlMixin, ArtMixin, PosterUrlMixin, PosterMixin, ThemeUrlMixin, ThemeMixin,
+    ArtUrlMixin, ArtMixin, LogoMixin, PosterUrlMixin, PosterMixin, ThemeUrlMixin, ThemeMixin,
     MovieEditMixins, ShowEditMixins, SeasonEditMixins, EpisodeEditMixins,
     WatchlistMixin
 )
@@ -26,6 +26,7 @@ class Video(PlexPartialObject, PlayedUnplayedMixin):
             artBlurHash (str): BlurHash string for artwork image.
             fields (List<:class:`~plexapi.media.Field`>): List of field objects.
             guid (str): Plex GUID for the movie, show, season, episode, or clip (plex://movie/5d776b59ad5437001f79c6f8).
+            images (List<:class:`~plexapi.media.Image`>): List of image objects.
             key (str): API URL (/library/metadata/<ratingkey>).
             lastRatedAt (datetime): Datetime the item was last rated.
             lastViewedAt (datetime): Datetime the item was last played.
@@ -53,6 +54,7 @@ class Video(PlexPartialObject, PlayedUnplayedMixin):
         self.artBlurHash = data.attrib.get('artBlurHash')
         self.fields = self.findItems(data, media.Field)
         self.guid = data.attrib.get('guid')
+        self.images = self.findItems(data, media.Image)
         self.key = data.attrib.get('key', '')
         self.lastRatedAt = utils.toDatetime(data.attrib.get('lastRatedAt'))
         self.lastViewedAt = utils.toDatetime(data.attrib.get('lastViewedAt'))
@@ -97,64 +99,88 @@ class Video(PlexPartialObject, PlayedUnplayedMixin):
         """ Returns str, default title for a new syncItem. """
         return self.title
 
-    def videoStreams(self):
-        """ Returns a list of :class:`~plexapi.media.videoStream` objects for all MediaParts. """
-        streams = []
-
-        if self.isPartialObject():
-            self.reload()
-
-        parts = self.iterParts()
-        for part in parts:
-            streams += part.videoStreams()
-        return streams
-
-    def audioStreams(self):
-        """ Returns a list of :class:`~plexapi.media.AudioStream` objects for all MediaParts. """
-        streams = []
-
-        if self.isPartialObject():
-            self.reload()
-
-        parts = self.iterParts()
-        for part in parts:
-            streams += part.audioStreams()
-        return streams
-
-    def subtitleStreams(self):
-        """ Returns a list of :class:`~plexapi.media.SubtitleStream` objects for all MediaParts. """
-        streams = []
-
-        if self.isPartialObject():
-            self.reload()
-
-        parts = self.iterParts()
-        for part in parts:
-            streams += part.subtitleStreams()
-        return streams
-
     def uploadSubtitles(self, filepath):
-        """ Upload Subtitle file for video. """
+        """ Upload a subtitle file for the video.
+
+            Parameters:
+                filepath (str): Path to subtitle file.
+        """
         url = f'{self.key}/subtitles'
         filename = os.path.basename(filepath)
         subFormat = os.path.splitext(filepath)[1][1:]
+        params = {
+            'title': filename,
+            'format': subFormat,
+        }
+        headers = {'Accept': 'text/plain, */*'}
         with open(filepath, 'rb') as subfile:
-            params = {'title': filename,
-                      'format': subFormat
-                      }
-            headers = {'Accept': 'text/plain, */*'}
             self._server.query(url, self._server._session.post, data=subfile, params=params, headers=headers)
         return self
 
-    def removeSubtitles(self, streamID=None, streamTitle=None):
-        """ Remove Subtitle from movie's subtitles listing.
+    def searchSubtitles(self, language='en', hearingImpaired=0, forced=0):
+        """ Search for on-demand subtitles for the video.
+            See https://support.plex.tv/articles/subtitle-search/.
 
-            Note: If subtitle file is located inside video directory it will bbe deleted.
-            Files outside of video directory are not effected.
+            Parameters:
+                language (str, optional): Language code (ISO 639-1) of the subtitles to search for.
+                    Default 'en'.
+                hearingImpaired (int, optional): Search option for SDH subtitles.
+                    Default 0.
+                    (0 = Prefer non-SDH subtitles, 1 = Prefer SDH subtitles,
+                    2 = Only show SDH subtitles, 3 = Only show non-SDH subtitles)
+                forced (int, optional): Search option for forced subtitles.
+                    Default 0.
+                    (0 = Prefer non-forced subtitles, 1 = Prefer forced subtitles,
+                    2 = Only show forced subtitles, 3 = Only show non-forced subtitles)
+
+            Returns:
+                List<:class:`~plexapi.media.SubtitleStream`>: List of SubtitleStream objects.
         """
-        for stream in self.subtitleStreams():
-            if streamID == stream.id or streamTitle == stream.title:
-                self._server.query(stream.key, self._server._session.delete)
+        params = {
+            'language': language,
+            'hearingImpaired': hearingImpaired,
+            'forced': forced,
+        }
+        key = f'{self.key}/subtitles{utils.joinArgs(params)}'
+        return self.fetchItems(key)
+
+    def downloadSubtitles(self, subtitleStream):
+        """ Download on-demand subtitles for the video.
+            See https://support.plex.tv/articles/subtitle-search/.
+
+            Note: This method is asynchronous and returns immediately before subtitles are fully downloaded.
+
+            Parameters:
+                subtitleStream (:class:`~plexapi.media.SubtitleStream`):
+                    Subtitle object returned from :func:`~plexapi.video.Video.searchSubtitles`.
+        """
+        key = f'{self.key}/subtitles'
+        params = {'key': subtitleStream.key}
+        self._server.query(key, self._server._session.put, params=params)
+        return self
+
+    def removeSubtitles(self, subtitleStream=None, streamID=None, streamTitle=None):
+        """ Remove an upload or downloaded subtitle from the video.
+
+            Note: If the subtitle file is located inside video directory it will be deleted.
+            Files outside of video directory are not affected.
+            Embedded subtitles cannot be removed.
+
+            Parameters:
+                subtitleStream (:class:`~plexapi.media.SubtitleStream`, optional): Subtitle object to remove.
+                streamID (int, optional): ID of the subtitle stream to remove.
+                streamTitle (str, optional): Title of the subtitle stream to remove.
+        """
+        if subtitleStream is None:
+            try:
+                subtitleStream = next(
+                    stream for stream in self.subtitleStreams()
+                    if streamID == stream.id or streamTitle == stream.title
+                )
+            except StopIteration:
+                raise BadRequest(f"Subtitle stream with ID '{streamID}' or title '{streamTitle}' not found.") from None
+
+        self._server.query(subtitleStream.key, self._server._session.delete)
         return self
 
     def optimize(self, title='', target='', deviceProfile='', videoQuality=None,
@@ -308,7 +334,7 @@ class Video(PlexPartialObject, PlayedUnplayedMixin):
 class Movie(
     Video, Playable,
     AdvancedSettingsMixin, SplitMergeMixin, UnmatchMatchMixin, ExtrasMixin, HubsMixin, RatingMixin,
-    ArtMixin, PosterMixin, ThemeMixin,
+    ArtMixin, LogoMixin, PosterMixin, ThemeMixin,
     MovieEditMixins,
     WatchlistMixin
 ):
@@ -344,10 +370,14 @@ class Movie(
             ratingImage (str): Key to critic rating image (rottentomatoes://image.rating.rotten).
             ratings (List<:class:`~plexapi.media.Rating`>): List of rating objects.
             roles (List<:class:`~plexapi.media.Role`>): List of role objects.
+            slug (str): The clean watch.plex.tv URL identifier for the movie.
             similar (List<:class:`~plexapi.media.Similar`>): List of Similar objects.
+            sourceURI (str): Remote server URI (server://<machineIdentifier>/com.plexapp.plugins.library)
+                (remote playlist item only).
             studio (str): Studio that created movie (Di Bonaventura Pictures; 21 Laps Entertainment).
             tagline (str): Movie tag line (Back 2 Work; Who says men can't change?).
             theme (str): URL to theme resource (/library/metadata/<ratingkey>/theme/<themeid>).
+            ultraBlurColors (:class:`~plexapi.media.UltraBlurColors`): Ultra blur color object.
             useOriginalTitle (int): Setting that indicates if the original title is used for the movie
                 (-1 = Library default, 0 = No, 1 = Yes).
             viewOffset (int): View offset in milliseconds.
@@ -387,10 +417,13 @@ class Movie(
         self.ratingImage = data.attrib.get('ratingImage')
         self.ratings = self.findItems(data, media.Rating)
         self.roles = self.findItems(data, media.Role)
+        self.slug = data.attrib.get('slug')
         self.similar = self.findItems(data, media.Similar)
+        self.sourceURI = data.attrib.get('source')  # remote playlist item
         self.studio = data.attrib.get('studio')
         self.tagline = data.attrib.get('tagline')
         self.theme = data.attrib.get('theme')
+        self.ultraBlurColors = self.findItem(data, media.UltraBlurColors)
         self.useOriginalTitle = utils.cast(int, data.attrib.get('useOriginalTitle', '-1'))
         self.viewOffset = utils.cast(int, data.attrib.get('viewOffset', 0))
         self.writers = self.findItems(data, media.Writer)
@@ -417,6 +450,11 @@ class Movie(
         return any(marker.type == 'credits' for marker in self.markers)
 
     @property
+    def hasVoiceActivity(self):
+        """ Returns True if any of the media has voice activity analyzed. """
+        return any(media.hasVoiceActivity for media in self.media)
+
+    @property
     def hasPreviewThumbnails(self):
         """ Returns True if any of the media parts has generated preview (BIF) thumbnails. """
         return any(part.hasPreviewThumbnails for media in self.media for part in media.parts)
@@ -427,8 +465,8 @@ class Movie(
 
     def reviews(self):
         """ Returns a list of :class:`~plexapi.media.Review` objects. """
-        data = self._server.query(self._details_key)
-        return self.findItems(data, media.Review, rtag='Video')
+        key = f'{self.key}?includeReviews=1'
+        return self.fetchItems(key, cls=media.Review, rtag='Video')
 
     def editions(self):
         """ Returns a list of :class:`~plexapi.video.Movie` objects
@@ -458,7 +496,7 @@ class Movie(
 class Show(
     Video,
     AdvancedSettingsMixin, SplitMergeMixin, UnmatchMatchMixin, ExtrasMixin, HubsMixin, RatingMixin,
-    ArtMixin, PosterMixin, ThemeMixin,
+    ArtMixin, LogoMixin, PosterMixin, ThemeMixin,
     ShowEditMixins,
     WatchlistMixin
 ):
@@ -507,12 +545,14 @@ class Show(
                 (None = Library default, tmdbAiring = The Movie Database (Aired),
                 aired = TheTVDB (Aired), dvd = TheTVDB (DVD), absolute = TheTVDB (Absolute)).
             similar (List<:class:`~plexapi.media.Similar`>): List of Similar objects.
+            slug (str): The clean watch.plex.tv URL identifier for the show.
             studio (str): Studio that created show (Di Bonaventura Pictures; 21 Laps Entertainment).
             subtitleLanguage (str): Setting that indicates the preferred subtitle language.
             subtitleMode (int): Setting that indicates the auto-select subtitle mode.
                 (-1 = Account default, 0 = Manually selected, 1 = Shown with foreign audio, 2 = Always enabled).
             tagline (str): Show tag line.
             theme (str): URL to theme resource (/library/metadata/<ratingkey>/theme/<themeid>).
+            ultraBlurColors (:class:`~plexapi.media.UltraBlurColors`): Ultra blur color object.
             useOriginalTitle (int): Setting that indicates if the original title is used for the show
                 (-1 = Library default, 0 = No, 1 = Yes).
             viewedLeafCount (int): Number of items marked as played in the show view.
@@ -556,11 +596,13 @@ class Show(
         self.seasonCount = utils.cast(int, data.attrib.get('seasonCount', self.childCount))
         self.showOrdering = data.attrib.get('showOrdering')
         self.similar = self.findItems(data, media.Similar)
+        self.slug = data.attrib.get('slug')
         self.studio = data.attrib.get('studio')
-        self.subtitleLanguage = data.attrib.get('audioLanguage', '')
+        self.subtitleLanguage = data.attrib.get('subtitleLanguage', '')
         self.subtitleMode = utils.cast(int, data.attrib.get('subtitleMode', '-1'))
         self.tagline = data.attrib.get('tagline')
         self.theme = data.attrib.get('theme')
+        self.ultraBlurColors = self.findItem(data, media.UltraBlurColors)
         self.useOriginalTitle = utils.cast(int, data.attrib.get('useOriginalTitle', '-1'))
         self.viewedLeafCount = utils.cast(int, data.attrib.get('viewedLeafCount'))
         self.year = utils.cast(int, data.attrib.get('year'))
@@ -583,8 +625,8 @@ class Show(
         """ Returns show's On Deck :class:`~plexapi.video.Video` object or `None`.
             If show is unwatched, return will likely be the first episode.
         """
-        data = self._server.query(self._details_key)
-        return next(iter(self.findItems(data, rtag='OnDeck')), None)
+        key = f'{self.key}?includeOnDeck=1'
+        return next(iter(self.fetchItems(key, cls=Episode, rtag='OnDeck')), None)
 
     def season(self, title=None, season=None):
         """ Returns the season with the specified title or number.
@@ -674,7 +716,7 @@ class Show(
 class Season(
     Video,
     AdvancedSettingsMixin, ExtrasMixin, RatingMixin,
-    ArtMixin, PosterMixin, ThemeUrlMixin,
+    ArtMixin, LogoMixin, PosterMixin, ThemeUrlMixin,
     SeasonEditMixins
 ):
     """ Represents a single Season.
@@ -682,6 +724,7 @@ class Season(
         Attributes:
             TAG (str): 'Directory'
             TYPE (str): 'season'
+            audienceRating (float): Audience rating.
             audioLanguage (str): Setting that indicates the preferred audio language.
             collections (List<:class:`~plexapi.media.Collection`>): List of collection objects.
             guids (List<:class:`~plexapi.media.Guid`>): List of guid objects.
@@ -693,14 +736,17 @@ class Season(
             parentIndex (int): Plex index number for the show.
             parentKey (str): API URL of the show (/library/metadata/<parentRatingKey>).
             parentRatingKey (int): Unique key identifying the show.
+            parentSlug (str): The clean watch.plex.tv URL identifier for the show.
             parentStudio (str): Studio that created show.
             parentTheme (str): URL to show theme resource (/library/metadata/<parentRatingkey>/theme/<themeid>).
             parentThumb (str): URL to show thumbnail image (/library/metadata/<parentRatingKey>/thumb/<thumbid>).
             parentTitle (str): Name of the show for the season.
+            rating (float): Season rating (7.9; 9.8; 8.1).
             ratings (List<:class:`~plexapi.media.Rating`>): List of rating objects.
             subtitleLanguage (str): Setting that indicates the preferred subtitle language.
             subtitleMode (int): Setting that indicates the auto-select subtitle mode.
                 (-1 = Series default, 0 = Manually selected, 1 = Shown with foreign audio, 2 = Always enabled).
+            ultraBlurColors (:class:`~plexapi.media.UltraBlurColors`): Ultra blur color object.
             viewedLeafCount (int): Number of items marked as played in the season view.
             year (int): Year the season was released.
     """
@@ -711,6 +757,7 @@ class Season(
     def _loadData(self, data):
         """ Load attribute values from Plex XML response. """
         Video._loadData(self, data)
+        self.audienceRating = utils.cast(float, data.attrib.get('audienceRating'))
         self.audioLanguage = data.attrib.get('audioLanguage', '')
         self.collections = self.findItems(data, media.Collection)
         self.guids = self.findItems(data, media.Guid)
@@ -722,13 +769,16 @@ class Season(
         self.parentIndex = utils.cast(int, data.attrib.get('parentIndex'))
         self.parentKey = data.attrib.get('parentKey')
         self.parentRatingKey = utils.cast(int, data.attrib.get('parentRatingKey'))
+        self.parentSlug = data.attrib.get('parentSlug')
         self.parentStudio = data.attrib.get('parentStudio')
         self.parentTheme = data.attrib.get('parentTheme')
         self.parentThumb = data.attrib.get('parentThumb')
         self.parentTitle = data.attrib.get('parentTitle')
+        self.rating = utils.cast(float, data.attrib.get('rating'))
         self.ratings = self.findItems(data, media.Rating)
-        self.subtitleLanguage = data.attrib.get('audioLanguage', '')
+        self.subtitleLanguage = data.attrib.get('subtitleLanguage', '')
         self.subtitleMode = utils.cast(int, data.attrib.get('subtitleMode', '-1'))
+        self.ultraBlurColors = self.findItem(data, media.UltraBlurColors)
         self.viewedLeafCount = utils.cast(int, data.attrib.get('viewedLeafCount'))
         self.year = utils.cast(int, data.attrib.get('year'))
 
@@ -759,8 +809,8 @@ class Season(
         """ Returns season's On Deck :class:`~plexapi.video.Video` object or `None`.
             Will only return a match if the show's On Deck episode is in this season.
         """
-        data = self._server.query(self._details_key)
-        return next(iter(self.findItems(data, rtag='OnDeck')), None)
+        key = f'{self.key}?includeOnDeck=1'
+        return next(iter(self.fetchItems(key, cls=Episode, rtag='OnDeck')), None)
 
     def episode(self, title=None, episode=None):
         """ Returns the episode with the given title or number.
@@ -833,7 +883,7 @@ class Season(
 class Episode(
     Video, Playable,
     ExtrasMixin, RatingMixin,
-    ArtMixin, PosterMixin, ThemeUrlMixin,
+    ArtMixin, LogoMixin, PosterMixin, ThemeUrlMixin,
     EpisodeEditMixins
 ):
     """ Represents a single Episode.
@@ -853,6 +903,7 @@ class Episode(
             grandparentGuid (str): Plex GUID for the show (plex://show/5d9c086fe9d5a1001f4d9fe6).
             grandparentKey (str): API URL of the show (/library/metadata/<grandparentRatingKey>).
             grandparentRatingKey (int): Unique key identifying the show.
+            grandparentSlug (str): The clean watch.plex.tv URL identifier for the show.
             grandparentTheme (str): URL to show theme resource (/library/metadata/<grandparentRatingkey>/theme/<themeid>).
             grandparentThumb (str): URL to show thumbnail image (/library/metadata/<grandparentRatingKey>/thumb/<thumbid>).
             grandparentTitle (str): Name of the show for the episode.
@@ -874,6 +925,9 @@ class Episode(
             ratings (List<:class:`~plexapi.media.Rating`>): List of rating objects.
             roles (List<:class:`~plexapi.media.Role`>): List of role objects.
             skipParent (bool): True if the show's seasons are set to hidden.
+            sourceURI (str): Remote server URI (server://<machineIdentifier>/com.plexapp.plugins.library)
+                (remote playlist item only).
+            ultraBlurColors (:class:`~plexapi.media.UltraBlurColors`): Ultra blur color object.
             viewOffset (int): View offset in milliseconds.
             writers (List<:class:`~plexapi.media.Writer`>): List of writers objects.
             year (int): Year the episode was released.
@@ -898,6 +952,7 @@ class Episode(
         self.grandparentGuid = data.attrib.get('grandparentGuid')
         self.grandparentKey = data.attrib.get('grandparentKey')
         self.grandparentRatingKey = utils.cast(int, data.attrib.get('grandparentRatingKey'))
+        self.grandparentSlug = data.attrib.get('grandparentSlug')
         self.grandparentTheme = data.attrib.get('grandparentTheme')
         self.grandparentThumb = data.attrib.get('grandparentThumb')
         self.grandparentTitle = data.attrib.get('grandparentTitle')
@@ -916,6 +971,8 @@ class Episode(
         self.ratings = self.findItems(data, media.Rating)
         self.roles = self.findItems(data, media.Role)
         self.skipParent = utils.cast(bool, data.attrib.get('skipParent', '0'))
+        self.sourceURI = data.attrib.get('source')  # remote playlist item
+        self.ultraBlurColors = self.findItem(data, media.UltraBlurColors)
         self.viewOffset = utils.cast(int, data.attrib.get('viewOffset', 0))
         self.writers = self.findItems(data, media.Writer)
         self.year = utils.cast(int, data.attrib.get('year'))
@@ -961,11 +1018,9 @@ class Episode(
     @cached_property
     def _season(self):
         """ Returns the :class:`~plexapi.video.Season` object by querying for the show's children. """
-        if not self.grandparentKey:
-            return None
-        return self.fetchItem(
-            f'{self.grandparentKey}/children?excludeAllLeaves=1&index={self.parentIndex}'
-        )
+        if self.grandparentKey and self.parentIndex is not None:
+            return self.fetchItem(f'{self.grandparentKey}/children?excludeAllLeaves=1&index={self.parentIndex}')
+        return None
 
     def __repr__(self):
         return '<{}>'.format(
@@ -1003,7 +1058,11 @@ class Episode(
     @cached_property
     def seasonNumber(self):
         """ Returns the episode's season number. """
-        return self.parentIndex if isinstance(self.parentIndex, int) else self._season.seasonNumber
+        if isinstance(self.parentIndex, int):
+            return self.parentIndex
+        elif self._season:
+            return self._season.index
+        return None
 
     @property
     def seasonEpisode(self):
@@ -1024,6 +1083,11 @@ class Episode(
     def hasCreditsMarker(self):
         """ Returns True if the episode has a credits marker. """
         return any(marker.type == 'credits' for marker in self.markers)
+
+    @property
+    def hasVoiceActivity(self):
+        """ Returns True if any of the media has voice activity analyzed. """
+        return any(media.hasVoiceActivity for media in self.media)
 
     @property
     def hasPreviewThumbnails(self):

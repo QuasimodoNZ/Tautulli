@@ -20,28 +20,19 @@
 # Form based authentication for CherryPy. Requires the
 # Session tool to be loaded.
 
-from future.builtins import object
-
 from datetime import datetime, timedelta, timezone
-from future.moves.urllib.parse import quote, unquote
+from urllib.parse import quote, unquote
 
 import cherrypy
 from hashing_passwords import check_hash
 import jwt
 
 import plexpy
-if plexpy.PYTHON2:
-    import logger
-    from database import MonitorDatabase
-    from helpers import timestamp
-    from users import Users, refresh_users
-    from plextv import PlexTV
-else:
-    from plexpy import logger
-    from plexpy.database import MonitorDatabase
-    from plexpy.helpers import timestamp
-    from plexpy.users import Users, refresh_users
-    from plexpy.plextv import PlexTV
+from plexpy import logger
+from plexpy.database import MonitorDatabase
+from plexpy.helpers import timestamp
+from plexpy.users import Users, refresh_users
+from plexpy.plextv import PlexTV
 
 # Monkey patch SameSite support into cookies.
 # https://stackoverflow.com/a/50813092
@@ -59,7 +50,7 @@ def plex_user_login(token=None, headers=None):
     user_token = None
     user_id = None
 
-    # Try to login to Plex.tv to check if the user has a vaild account
+    # Try to login to Plex.tv to check if the user has a valid account
     if token:
         plex_tv = PlexTV(token=token, headers=headers)
         plex_user = plex_tv.get_plex_account_details()
@@ -185,7 +176,10 @@ def check_auth(*args, **kwargs):
                     raise cherrypy.HTTPRedirect(plexpy.HTTP_ROOT)
 
         else:
-            redirect_uri = cherrypy.request.wsgi_environ['REQUEST_URI']
+            if cherrypy.request.headers.get('X-Requested-With') == 'XMLHttpRequest':
+                raise cherrypy.HTTPError(401)
+            
+            redirect_uri = cherrypy.request.path_info
             if redirect_uri:
                 redirect_uri = '?redirect_uri=' + quote(redirect_uri)
 
@@ -337,12 +331,12 @@ class AuthController(object):
 
         jwt_cookie = str(JWT_COOKIE_NAME + plexpy.CONFIG.PMS_UUID)
         cherrypy.response.cookie[jwt_cookie] = ''
-        cherrypy.response.cookie[jwt_cookie]['expires'] = 0
+        cherrypy.response.cookie[jwt_cookie]['max-age'] = 0
         cherrypy.response.cookie[jwt_cookie]['path'] = plexpy.HTTP_ROOT.rstrip('/') or '/'
 
         if plexpy.HTTP_ROOT != '/':
             # Also expire the JWT on the root path
-            cherrypy.response.headers['Set-Cookie'] = jwt_cookie + '=""; expires=Thu, 01 Jan 1970 12:00:00 GMT; path=/'
+            cherrypy.response.headers['Set-Cookie'] = jwt_cookie + '=""; max-age=0; path=/'
 
         cherrypy.request.login = None
 

@@ -13,10 +13,6 @@
 #  You should have received a copy of the GNU General Public License
 #  along with Tautulli.  If not, see <http://www.gnu.org/licenses/>.
 
-from __future__ import unicode_literals
-from future.builtins import str
-from future.builtins import object
-
 import os
 import sqlite3
 import shutil
@@ -24,12 +20,8 @@ import threading
 import time
 
 import plexpy
-if plexpy.PYTHON2:
-    import helpers
-    import logger
-else:
-    from plexpy import helpers
-    from plexpy import logger
+from plexpy import helpers
+from plexpy import logger
 
 
 FILENAME = "tautulli.db"
@@ -499,3 +491,7 @@ class MonitorDatabase(object):
         result = self.select_single(query="SELECT last_insert_rowid() AS last_id")
         if result:
             return result.get('last_id', None)
+        
+    def __del__(self):
+        # Close the database connection when object is garbage collected
+        self.connection.close()

@@ -36,7 +36,7 @@ and [PlexWatchWeb](https://github.com/ecleese/plexWatchWeb).
 [![Docker Stars][badge-docker-stars]][DockerHub]
 [![Downloads][badge-downloads]][Releases Latest]
 
-[badge-python]: https://img.shields.io/badge/python->=3.8-blue?style=flat-square
+[badge-python]: https://img.shields.io/badge/python->=3.9-blue?style=flat-square
 [badge-docker-pulls]: https://img.shields.io/docker/pulls/tautulli/tautulli?style=flat-square
 [badge-docker-stars]: https://img.shields.io/docker/stars/tautulli/tautulli?style=flat-square
 [badge-downloads]: https://img.shields.io/github/downloads/Tautulli/Tautulli/total?style=flat-square
@@ -129,7 +129,7 @@ This is free software under the GPL v3 open source license. Feel free to do with
 but any modification must be open sourced. A copy of the license is included.
 
 This software includes Highsoft software libraries which you may freely distribute for 
-non-commercial use. Commerical users must licence this software, for more information visit
+non-commercial use. Commercial users must licence this software, for more information visit
 https://shop.highsoft.com/faq/non-commercial#non-commercial-redistribution.
 
 

@@ -29,6 +29,7 @@ class Collection(
             addedAt (datetime): Datetime the collection was added to the library.
             art (str): URL to artwork image (/library/metadata/<ratingKey>/art/<artid>).
             artBlurHash (str): BlurHash string for artwork image.
+            audienceRating (float): Audience rating.
             childCount (int): Number of items in the collection.
             collectionFilterBasedOnUser (int): Which user's activity is used for the collection filtering.
             collectionMode (int): How the items in the collection are displayed.
@@ -38,6 +39,7 @@ class Collection(
             contentRating (str) Content rating (PG-13; NR; TV-G).
             fields (List<:class:`~plexapi.media.Field`>): List of field objects.
             guid (str): Plex GUID for the collection (collection://XXXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXX).
+            images (List<:class:`~plexapi.media.Image`>): List of image objects.
             index (int): Plex index number for the collection.
             key (str): API URL (/library/metadata/<ratingkey>).
             labels (List<:class:`~plexapi.media.Label`>): List of label objects.
@@ -47,6 +49,7 @@ class Collection(
             librarySectionTitle (str): :class:`~plexapi.library.LibrarySection` title.
             maxYear (int): Maximum year for the items in the collection.
             minYear (int): Minimum year for the items in the collection.
+            rating (float): Collection rating (7.9; 9.8; 8.1).
             ratingCount (int): The number of ratings.
             ratingKey (int): Unique key identifying the collection.
             smart (bool): True if the collection is a smart collection.
@@ -58,6 +61,7 @@ class Collection(
             title (str): Name of the collection.
             titleSort (str): Title to use when sorting (defaults to title).
             type (str): 'collection'
+            ultraBlurColors (:class:`~plexapi.media.UltraBlurColors`): Ultra blur color object.
             updatedAt (datetime): Datetime the collection was updated.
             userRating (float): Rating of the collection (0.0 - 10.0) equaling (0 stars - 5 stars).
     """
@@ -69,6 +73,7 @@ class Collection(
         self.addedAt = utils.toDatetime(data.attrib.get('addedAt'))
         self.art = data.attrib.get('art')
         self.artBlurHash = data.attrib.get('artBlurHash')
+        self.audienceRating = utils.cast(float, data.attrib.get('audienceRating'))
         self.childCount = utils.cast(int, data.attrib.get('childCount'))
         self.collectionFilterBasedOnUser = utils.cast(int, data.attrib.get('collectionFilterBasedOnUser', '0'))
         self.collectionMode = utils.cast(int, data.attrib.get('collectionMode', '-1'))
@@ -78,6 +83,7 @@ class Collection(
         self.contentRating = data.attrib.get('contentRating')
         self.fields = self.findItems(data, media.Field)
         self.guid = data.attrib.get('guid')
+        self.images = self.findItems(data, media.Image)
         self.index = utils.cast(int, data.attrib.get('index'))
         self.key = data.attrib.get('key', '').replace('/children', '')  # FIX_BUG_50
         self.labels = self.findItems(data, media.Label)
@@ -87,6 +93,7 @@ class Collection(
         self.librarySectionTitle = data.attrib.get('librarySectionTitle')
         self.maxYear = utils.cast(int, data.attrib.get('maxYear'))
         self.minYear = utils.cast(int, data.attrib.get('minYear'))
+        self.rating = utils.cast(float, data.attrib.get('rating'))
         self.ratingCount = utils.cast(int, data.attrib.get('ratingCount'))
         self.ratingKey = utils.cast(int, data.attrib.get('ratingKey'))
         self.smart = utils.cast(bool, data.attrib.get('smart', '0'))
@@ -98,6 +105,7 @@ class Collection(
         self.title = data.attrib.get('title')
         self.titleSort = data.attrib.get('titleSort', self.title)
         self.type = data.attrib.get('type')
+        self.ultraBlurColors = self.findItem(data, media.UltraBlurColors)
         self.updatedAt = utils.toDatetime(data.attrib.get('updatedAt'))
         self.userRating = utils.cast(float, data.attrib.get('userRating'))
         self._items = None  # cache for self.items
@@ -276,7 +284,7 @@ class Collection(
 
                 .. code-block:: python
 
-                    collection.updateSort(mode="alpha")
+                    collection.sortUpdate(sort="alpha")
 
         """
         if self.smart:
@@ -503,6 +511,8 @@ class Collection(
                 :class:`~plexapi.collection.Collection`: A new instance of the created Collection.
         """
         if smart:
+            if items:
+                raise BadRequest('Cannot create a smart collection with items.')
             return cls._createSmart(server, title, section, limit, libtype, sort, filters, **kwargs)
         else:
             return cls._create(server, title, section, items)

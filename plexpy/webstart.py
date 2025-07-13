@@ -19,19 +19,15 @@ import os
 import ssl
 import sys
 
+import cheroot.errors
 import cherrypy
+import cherrypy_cors
 
 import plexpy
-if plexpy.PYTHON2:
-    import logger
-    import webauth
-    from helpers import create_https_certificates
-    from webserve import WebInterface, BaseRedirect
-else:
-    from plexpy import logger
-    from plexpy import webauth
-    from plexpy.helpers import create_https_certificates
-    from plexpy.webserve import WebInterface, BaseRedirect
+from plexpy import logger
+from plexpy import webauth
+from plexpy.helpers import create_https_certificates
+from plexpy.webserve import WebInterface, BaseRedirect
 
 
 def start():
@@ -57,6 +53,7 @@ def start():
 def stop():
     logger.info("Tautulli WebStart :: Stopping Tautulli web server...")
     cherrypy.engine.exit()
+    cherrypy.server.httpserver = None
 
 
 def restart():
@@ -66,6 +63,7 @@ def restart():
 
 
 def initialize(options):
+    cherrypy_cors.install()
 
     # HTTPS stuff stolen from sickbeard
     enable_https = options['enable_https']
@@ -95,7 +93,8 @@ def initialize(options):
         'server.socket_timeout': 60,
         'tools.encode.on': True,
         'tools.encode.encoding': 'utf-8',
-        'tools.decode.on': True
+        'tools.decode.on': True,
+        'cors.expose.on': True,
     }
 
     if plexpy.DEV:
@@ -173,6 +172,12 @@ def initialize(options):
             'tools.auth_basic.on': False
         },
         '/status': {
+            'tools.auth_basic.on': False
+        },
+        '/newsletter': {
+            'tools.auth_basic.on': False
+        },
+        '/image': {
             'tools.auth_basic.on': False
         },
         '/interfaces': {
@@ -264,6 +269,13 @@ def initialize(options):
             'tools.auth.on': False
         }
     }
+
+    # Catch shutdown errors that can break cherrypy/cheroot
+    # See https://github.com/cherrypy/cheroot/issues/710
+    try:
+        cheroot.errors.acceptable_sock_shutdown_exceptions += (OSError,)
+    except AttributeError:
+        pass
 
     cherrypy.tree.mount(WebInterface(), options['http_root'], config=conf)
     if plexpy.HTTP_ROOT != '/':

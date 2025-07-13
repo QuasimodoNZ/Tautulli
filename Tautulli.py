@@ -23,7 +23,6 @@ import sys
 # Ensure lib added to path, before any other imports
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), 'lib'))
 
-from future.builtins import str
 
 import argparse
 import datetime
@@ -35,6 +34,7 @@ import shutil
 import time
 import threading
 import tzlocal
+import ctypes
 
 import plexpy
 from plexpy import common, config, database, helpers, logger, webstart
@@ -70,8 +70,26 @@ def main():
     plexpy.SYS_ENCODING = None
 
     try:
-        locale.setlocale(locale.LC_ALL, "")
-        plexpy.SYS_LANGUAGE, plexpy.SYS_ENCODING = locale.getdefaultlocale()
+
+        # Attempt to get the system's locale settings
+        language_code, encoding = locale.getlocale()
+
+        # Special handling for Windows platform
+        if sys.platform == 'win32':
+            # Get the user's current language settings on Windows
+            windll = ctypes.windll.kernel32
+            lang_id = windll.GetUserDefaultLCID()
+
+            # Map Windows language ID to locale identifier
+            language_code = locale.windows_locale.get(lang_id, '')
+
+        # Get the preferred encoding
+        encoding = locale.getpreferredencoding()
+
+        # Assign values to application-specific variable
+        plexpy.SYS_LANGUAGE = language_code
+        plexpy.SYS_ENCODING = encoding
+
     except (locale.Error, IOError):
         pass
 
@@ -111,7 +129,7 @@ def main():
     if args.quiet:
         plexpy.QUIET = True
 
-    # Do an intial setup of the logger.
+    # Do an initial setup of the logger.
     # Require verbose for pre-initilization to see critical errors
     logger.initLogger(console=not plexpy.QUIET, log_dir=False, verbose=True)
 

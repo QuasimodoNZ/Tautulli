@@ -15,28 +15,17 @@
 #  You should have received a copy of the GNU General Public License
 #  along with Tautulli.  If not, see <http://www.gnu.org/licenses/>.
 
-from __future__ import unicode_literals
-from future.builtins import str
-from future.builtins import range
-from future.builtins import object
+import datetime
 
 import arrow
-import datetime
+
 import plexpy
-if plexpy.PYTHON2:
-    import common
-    import database
-    import helpers
-    import logger
-    import libraries
-    import session
-else:
-    from plexpy import common
-    from plexpy import database
-    from plexpy import helpers
-    from plexpy import logger
-    from plexpy import libraries
-    from plexpy import session
+from plexpy import common
+from plexpy import database
+from plexpy import helpers
+from plexpy import logger
+from plexpy import libraries
+from plexpy import session
 
 
 class Graphs(object):
@@ -148,6 +137,12 @@ class Graphs(object):
             series_output.append(series_3_output)
         if libraries.has_library_type('live'):
             series_output.append(series_4_output)
+
+        if len(series_output) > 0:
+            series_total = [sum(x) for x in zip(*[x['data'] for x in series_output])]
+            series_total_output = {'name': 'Total',
+                                   'data': series_total}
+            series_output.append(series_total_output)
 
         output = {'categories': categories,
                   'series': series_output}
