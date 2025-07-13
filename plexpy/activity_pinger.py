@@ -13,34 +13,18 @@
 #  You should have received a copy of the GNU General Public License
 #  along with Tautulli.  If not, see <http://www.gnu.org/licenses/>.
 
-from __future__ import unicode_literals
-from future.builtins import str
-
 import threading
 
 import plexpy
-if plexpy.PYTHON2:
-    import activity_handler
-    import activity_processor
-    import database
-    import helpers
-    import libraries
-    import logger
-    import notification_handler
-    import plextv
-    import pmsconnect
-    import web_socket
-else:
-    from plexpy import activity_handler
-    from plexpy import activity_processor
-    from plexpy import database
-    from plexpy import helpers
-    from plexpy import libraries
-    from plexpy import logger
-    from plexpy import notification_handler
-    from plexpy import plextv
-    from plexpy import pmsconnect
-    from plexpy import web_socket
+from plexpy import activity_handler
+from plexpy import activity_processor
+from plexpy import database
+from plexpy import helpers
+from plexpy import logger
+from plexpy import notification_handler
+from plexpy import plextv
+from plexpy import pmsconnect
+from plexpy import web_socket
 
 
 monitor_lock = threading.Lock()
@@ -189,7 +173,7 @@ def check_active_sessions(ws_request=False):
                     row_id = monitor_process.write_session_history(session=stream)
 
                     if row_id:
-                        # If session is written to the databaase successfully, remove the session from the session table
+                        # If session is written to the database successfully, remove the session from the session table
                         logger.debug("Tautulli Monitor :: Removing sessionKey %s ratingKey %s from session queue"
                                      % (stream['session_key'], stream['rating_key']))
                         monitor_process.delete_session(row_id=row_id)

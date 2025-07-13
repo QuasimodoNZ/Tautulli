@@ -15,23 +15,18 @@
 #  You should have received a copy of the GNU General Public License
 #  along with Tautulli.  If not, see <http://www.gnu.org/licenses/>.
 
-from __future__ import unicode_literals
-from future.builtins import next
-from future.builtins import object
-from future.builtins import str
-from backports import csv
-
-from io import open, BytesIO
 import base64
+import csv
+from io import open, BytesIO
 import json
-import ssl as _ssl
 import linecache
 import os
 import shutil
+import ssl as _ssl
 import sys
 import threading
 import zipfile
-from future.moves.urllib.parse import urlencode
+from urllib.parse import urlencode
 
 import cherrypy
 from cherrypy.lib.static import serve_file, serve_fileobj, serve_download
@@ -49,76 +44,40 @@ if sys.version_info >= (3, 6):
     import secrets
 
 import plexpy
-if plexpy.PYTHON2:
-    import activity_pinger
-    import activity_processor
-    import common
-    import config
-    import database
-    import datafactory
-    import exporter
-    import graphs
-    import helpers
-    import http_handler
-    import libraries
-    import log_reader
-    import logger
-    import newsletter_handler
-    import newsletters
-    import mobile_app
-    import notification_handler
-    import notifiers
-    import plextv
-    import plexivity_import
-    import plexwatch_import
-    import pmsconnect
-    import users
-    import versioncheck
-    import web_socket
-    import webstart
-    from api2 import API2
-    from helpers import checked, addtoapi, get_ip, create_https_certificates, build_datatables_json, sanitize_out
-    from session import get_session_info, get_session_user_id, allow_session_user, allow_session_library
-    from webauth import AuthController, requireAuth, member_of, check_auth, get_jwt_token
-    if common.PLATFORM == 'Windows':
-        import windows
-    elif common.PLATFORM == 'Darwin':
-        import macos
-else:
-    from plexpy import activity_pinger
-    from plexpy import activity_processor
-    from plexpy import common
-    from plexpy import config
-    from plexpy import database
-    from plexpy import datafactory
-    from plexpy import exporter
-    from plexpy import graphs
-    from plexpy import helpers
-    from plexpy import http_handler
-    from plexpy import libraries
-    from plexpy import log_reader
-    from plexpy import logger
-    from plexpy import newsletter_handler
-    from plexpy import newsletters
-    from plexpy import mobile_app
-    from plexpy import notification_handler
-    from plexpy import notifiers
-    from plexpy import plextv
-    from plexpy import plexivity_import
-    from plexpy import plexwatch_import
-    from plexpy import pmsconnect
-    from plexpy import users
-    from plexpy import versioncheck
-    from plexpy import web_socket
-    from plexpy import webstart
-    from plexpy.api2 import API2
-    from plexpy.helpers import checked, addtoapi, get_ip, create_https_certificates, build_datatables_json, sanitize_out
-    from plexpy.session import get_session_info, get_session_user_id, allow_session_user, allow_session_library
-    from plexpy.webauth import AuthController, requireAuth, member_of, check_auth, get_jwt_token
-    if common.PLATFORM == 'Windows':
-        from plexpy import windows
-    elif common.PLATFORM == 'Darwin':
-        from plexpy import macos
+from plexpy import activity_pinger
+from plexpy import activity_processor
+from plexpy import common
+from plexpy import config
+from plexpy import database
+from plexpy import datafactory
+from plexpy import exporter
+from plexpy import graphs
+from plexpy import helpers
+from plexpy import http_handler
+from plexpy import libraries
+from plexpy import log_reader
+from plexpy import logger
+from plexpy import newsletter_handler
+from plexpy import newsletters
+from plexpy import mobile_app
+from plexpy import notification_handler
+from plexpy import notifiers
+from plexpy import plextv
+from plexpy import plexivity_import
+from plexpy import plexwatch_import
+from plexpy import pmsconnect
+from plexpy import users
+from plexpy import versioncheck
+from plexpy import web_socket
+from plexpy import webstart
+from plexpy.api2 import API2
+from plexpy.helpers import checked, addtoapi, get_ip, create_https_certificates, build_datatables_json, sanitize_out
+from plexpy.session import get_session_info, get_session_user_id, allow_session_user, allow_session_library
+from plexpy.webauth import AuthController, requireAuth, member_of, check_auth, get_jwt_token
+if common.PLATFORM == 'Windows':
+    from plexpy import windows
+elif common.PLATFORM == 'Darwin':
+    from plexpy import macos
 
 
 TEMPLATE_LOOKUP = None
@@ -216,7 +175,6 @@ class WebInterface(object):
             "pms_identifier": plexpy.CONFIG.PMS_IDENTIFIER,
             "pms_ip": plexpy.CONFIG.PMS_IP,
             "pms_port": plexpy.CONFIG.PMS_PORT,
-            "pms_is_remote": plexpy.CONFIG.PMS_IS_REMOTE,
             "pms_ssl": plexpy.CONFIG.PMS_SSL,
             "pms_is_cloud": plexpy.CONFIG.PMS_IS_CLOUD,
             "pms_name": helpers.pms_name(),
@@ -650,7 +608,7 @@ class WebInterface(object):
             status_message = ''
         else:
             result = None
-            status_message = 'An error occured.'
+            status_message = 'An error occurred.'
 
         return serve_template(template_name="edit_library.html", title="Edit Library",
                               data=result, server_id=plexpy.CONFIG.PMS_IDENTIFIER, status_message=status_message)
@@ -1389,7 +1347,7 @@ class WebInterface(object):
             status_message = ''
         else:
             result = None
-            status_message = 'An error occured.'
+            status_message = 'An error occurred.'
 
         return serve_template(template_name="edit_user.html", title="Edit User", data=result, status_message=status_message)
 
@@ -1407,7 +1365,7 @@ class WebInterface(object):
                 keep_history (int):         0 or 1
                 allow_guest (int):          0 or 1
 
-            Optional paramters:
+            Optional parameters:
                 None
 
             Returns:
@@ -2038,15 +1996,15 @@ class WebInterface(object):
         if 'start_date' in kwargs:
             start_date = helpers.split_strip(kwargs.pop('start_date', ''))
             if start_date:
-                custom_where.append(['strftime("%Y-%m-%d", datetime(started, "unixepoch", "localtime"))', start_date])
+                custom_where.append(["strftime('%Y-%m-%d', datetime(started, 'unixepoch', 'localtime'))", start_date])
         if 'before' in kwargs:
             before = helpers.split_strip(kwargs.pop('before', ''))
             if before:
-                custom_where.append(['strftime("%Y-%m-%d", datetime(started, "unixepoch", "localtime")) <', before])
+                custom_where.append(["strftime('%Y-%m-%d', datetime(started, 'unixepoch', 'localtime')) <", before])
         if 'after' in kwargs:
             after = helpers.split_strip(kwargs.pop('after', ''))
             if after:
-                custom_where.append(['strftime("%Y-%m-%d", datetime(started, "unixepoch", "localtime")) >', after])
+                custom_where.append(["strftime('%Y-%m-%d', datetime(started, 'unixepoch', 'localtime')) >", after])
         if 'reference_id' in kwargs:
             reference_id = helpers.split_strip(kwargs.pop('reference_id', ''))
             if reference_id:
@@ -3073,7 +3031,7 @@ class WebInterface(object):
         """ Delete the Tautulli notification logs.
 
             ```
-            Required paramters:
+            Required parameters:
                 None
 
             Optional parameters:
@@ -3098,7 +3056,7 @@ class WebInterface(object):
         """ Delete the Tautulli newsletter logs.
 
             ```
-            Required paramters:
+            Required parameters:
                 None
 
             Optional parameters:
@@ -3123,7 +3081,7 @@ class WebInterface(object):
         """ Delete the Tautulli login logs.
 
             ```
-            Required paramters:
+            Required parameters:
                 None
 
             Optional parameters:
@@ -3288,7 +3246,6 @@ class WebInterface(object):
 
         # If we change the SSL setting for PMS or PMS remote setting, make sure we grab the new url.
         if kwargs.get('pms_ssl') != str(plexpy.CONFIG.PMS_SSL) or \
-                kwargs.get('pms_is_remote') != str(plexpy.CONFIG.PMS_IS_REMOTE) or \
                 kwargs.get('pms_url_manual') != plexpy.CONFIG.PMS_URL_MANUAL:
             server_changed = True
 
@@ -4101,7 +4058,7 @@ class WebInterface(object):
     @cherrypy.tools.json_out()
     @requireAuth(member_of("admin"))
     @addtoapi()
-    def get_server_id(self, hostname=None, port=None, identifier=None, ssl=0, remote=0, manual=0,
+    def get_server_id(self, hostname=None, port=None, identifier=None, ssl=0, manual=0,
                       get_url=False, test_websocket=False, **kwargs):
         """ Get the PMS server identifier.
 
@@ -4156,7 +4113,6 @@ class WebInterface(object):
                 server = self.get_server_resources(pms_ip=hostname,
                                                    pms_port=port,
                                                    pms_ssl=ssl,
-                                                   pms_is_remote=remote,
                                                    pms_url_manual=manual,
                                                    pms_identifier=identifier)
                 result['url'] = server['pms_url']
@@ -4367,8 +4323,6 @@ class WebInterface(object):
     @cherrypy.expose
     @requireAuth(member_of("admin"))
     def update(self, **kwargs):
-        if plexpy.PYTHON2:
-            raise cherrypy.HTTPRedirect(plexpy.HTTP_ROOT + "home?update=python2")
         if plexpy.DOCKER or plexpy.SNAP:
             raise cherrypy.HTTPRedirect(plexpy.HTTP_ROOT + "home")
 
@@ -4497,10 +4451,10 @@ class WebInterface(object):
 
     @cherrypy.expose
     @requireAuth()
-    def item_watch_time_stats(self, rating_key=None, media_type=None, **kwargs):
-        if rating_key:
+    def item_watch_time_stats(self, rating_key=None, guid=None, media_type=None, **kwargs):
+        if rating_key or guid:
             item_data = datafactory.DataFactory()
-            result = item_data.get_watch_time_stats(rating_key=rating_key, media_type=media_type)
+            result = item_data.get_watch_time_stats(rating_key=rating_key, guid=guid, media_type=media_type)
         else:
             result = None
 
@@ -4512,10 +4466,10 @@ class WebInterface(object):
 
     @cherrypy.expose
     @requireAuth()
-    def item_user_stats(self, rating_key=None, media_type=None, **kwargs):
-        if rating_key:
+    def item_user_stats(self, rating_key=None, guid=None, media_type=None, **kwargs):
+        if rating_key or guid:
             item_data = datafactory.DataFactory()
-            result = item_data.get_user_stats(rating_key=rating_key, media_type=media_type)
+            result = item_data.get_user_stats(rating_key=rating_key, guid=guid, media_type=media_type)
         else:
             result = None
 
@@ -5398,6 +5352,7 @@ class WebInterface(object):
                          "tvdb://121361"
                      ],
                      "grandparent_rating_key": "1219",
+                     "grandparent_slug": "game-of-thrones",
                      "grandparent_thumb": "/library/metadata/1219/thumb/1462175063",
                      "grandparent_title": "Game of Thrones",
                      "grandparent_year": "2011",
@@ -5439,8 +5394,11 @@ class WebInterface(object):
                              "audio_profile": "",
                              "bitrate": "10617",
                              "channel_call_sign": "",
+                             "channel_id": "",
                              "channel_identifier": "",
+                             "channel_title": "",
                              "channel_thumb": "",
+                             "channel_vcn": "",
                              "container": "mkv",
                              "height": "1078",
                              "id": "257925",
@@ -5464,6 +5422,13 @@ class WebInterface(object):
                                              "video_color_space": "bt709",
                                              "video_color_trc": "",
                                              "video_dynamic_range": "SDR",
+                                             "video_dovi_bl_present": 0,
+                                             "video_dovi_el_present": 0,
+                                             "video_dovi_level": 0,
+                                             "video_dovi_present": 0,
+                                             "video_dovi_profile": 0,
+                                             "video_dovi_rpu_present": 0,
+                                             "video_dovi_version": 0,
                                              "video_frame_rate": "23.976",
                                              "video_height": "1078",
                                              "video_language": "",
@@ -5520,6 +5485,7 @@ class WebInterface(object):
                      ],
                      "parent_media_index": "6",
                      "parent_rating_key": "153036",
+                     "parent_slug": "game-of-thrones",
                      "parent_thumb": "/library/metadata/153036/thumb/1462175062",
                      "parent_title": "Season 6",
                      "parent_year": "2016",
@@ -5527,6 +5493,7 @@ class WebInterface(object):
                      "rating_image": "",
                      "rating_key": "153037",
                      "section_id": "2",
+                     "slug": "game-of-thrones",
                      "sort_title": "Red Woman",
                      "studio": "Revolution Sun Studios",
                      "summary": "The fate of Jon Snow is revealed. Daenerys meets a strong man. Cersei sees her daughter once again.",
@@ -5853,9 +5820,12 @@ class WebInterface(object):
                              "bif_thumb": "/library/parts/274169/indexes/sd/1000",
                              "bitrate": "10617",
                              "channel_call_sign": "",
+                             "channel_id": "",
                              "channel_identifier": "",
                              "channel_stream": 0,
+                             "channel_title": "",
                              "channel_thumb": "",
+                             "channel_vcn": "",
                              "children_count": "",
                              "collections": [],
                              "container": "mkv",
@@ -5951,6 +5921,7 @@ class WebInterface(object):
                              "stream_audio_decision": "direct play",
                              "stream_audio_language": "",
                              "stream_audio_language_code": "",
+                             "stream_audio_profile": "",
                              "stream_audio_sample_rate": "48000",
                              "stream_bitrate": "10617",
                              "stream_container": "mkv",
@@ -6276,7 +6247,7 @@ class WebInterface(object):
     @addtoapi()
     def get_home_stats(self, grouping=None, time_range=30, stats_type='plays',
                        stats_start=0, stats_count=10, stat_id='',
-                       section_id=None, user_id=None, **kwargs):
+                       section_id=None, user_id=None, before=None, after=None, **kwargs):
         """ Get the homepage watch statistics.
 
             ```
@@ -6294,6 +6265,8 @@ class WebInterface(object):
                                         'top_users', 'top_platforms', 'last_watched', 'most_concurrent'
                 section_id (int):       The id of the Plex library section
                 user_id (int):          The id of the Plex user
+                before (str):           Stats before and including the date, "YYYY-MM-DD"
+                after (str):            Stats after and including the date, "YYYY-MM-DD"
 
             Returns:
                 json:
@@ -6377,7 +6350,9 @@ class WebInterface(object):
                                              stats_count=stats_count,
                                              stat_id=stat_id,
                                              section_id=section_id,
-                                             user_id=user_id)
+                                             user_id=user_id,
+                                             before=before,
+                                             after=after)
 
         if result:
             return result
@@ -6992,6 +6967,7 @@ class WebInterface(object):
                           "file_size": 57793562,
                           "filename": null,
                           "individual_files": 1,
+                          "logo_level": 0,
                           "media_info_level": 1,
                           "media_type": "collection",
                           "media_type_title": "Collection",
@@ -7087,7 +7063,7 @@ class WebInterface(object):
     @addtoapi()
     def export_metadata(self, section_id=None, user_id=None, rating_key=None, file_format='csv',
                         metadata_level=1, media_info_level=1,
-                        thumb_level=0, art_level=0,
+                        thumb_level=0, art_level=0, logo_level=0,
                         custom_fields='', export_type='all', individual_files=False, **kwargs):
         """ Export library or media metadata to a file
 
@@ -7103,6 +7079,7 @@ class WebInterface(object):
                 media_info_level (int):    The level of media info to export (default 1)
                 thumb_level (int):         The level of poster/cover images to export (default 0)
                 art_level (int):           The level of background artwork images to export (default 0)
+                logo_level (int):          The level of logo images to export (default 0)
                 custom_fields (str):       Comma separated list of custom fields to export
                                            in addition to the export level selected
                 export_type (str):         'collection' or 'playlist' for library/user export,
@@ -7123,6 +7100,7 @@ class WebInterface(object):
                                  media_info_level=media_info_level,
                                  thumb_level=thumb_level,
                                  art_level=art_level,
+                                 logo_level=logo_level,
                                  custom_fields=custom_fields,
                                  export_type=export_type,
                                  individual_files=individual_files).export()
@@ -7212,7 +7190,7 @@ class WebInterface(object):
         result = exporter.get_export(export_id=export_id)
 
         if result and result['complete'] == 1 and result['exists']:
-            if result['thumb_level'] or result['art_level'] or result['individual_files']:
+            if result['thumb_level'] or result['art_level'] or result['logo_level'] or result['individual_files']:
                 directory = exporter.format_export_directory(result['title'], result['timestamp'])
                 dirpath = exporter.get_export_dirpath(directory)
                 zip_filename = '{}.zip'.format(directory)

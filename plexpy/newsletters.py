@@ -15,39 +15,25 @@
 #  You should have received a copy of the GNU General Public License
 #  along with Tautulli.  If not, see <http://www.gnu.org/licenses/>.
 
-from __future__ import unicode_literals
-from future.builtins import next
-from future.builtins import str
-from future.builtins import object
-
-import arrow
 from collections import OrderedDict
 import json
 from itertools import groupby
-from mako.lookup import TemplateLookup
-from mako import exceptions
 import os
 import re
 
+import arrow
+from mako.lookup import TemplateLookup
+from mako import exceptions
+
 import plexpy
-if plexpy.PYTHON2:
-    import common
-    import database
-    import helpers
-    import libraries
-    import logger
-    import newsletter_handler
-    import pmsconnect
-    from notifiers import send_notification, EMAIL
-else:
-    from plexpy import common
-    from plexpy import database
-    from plexpy import helpers
-    from plexpy import libraries
-    from plexpy import logger
-    from plexpy import newsletter_handler
-    from plexpy import pmsconnect
-    from plexpy.notifiers import send_notification, EMAIL
+from plexpy import common
+from plexpy import database
+from plexpy import helpers
+from plexpy import libraries
+from plexpy import logger
+from plexpy import newsletter_handler
+from plexpy import pmsconnect
+from plexpy.notifiers import send_notification, EMAIL
 
 
 AGENT_IDS = {
@@ -473,8 +459,12 @@ class Newsletter(object):
 
         self.retrieve_data()
 
+        # Convert CustomArrow to string
+        from plexpy.notification_handler import CustomArrow
+        parameters = {k: str(v) if isinstance(v, CustomArrow) else v for k, v in self.parameters.items()}
+
         return {'title': self.NAME,
-                'parameters': self.parameters,
+                'parameters': parameters,
                 'data': self.data}
 
     def generate_newsletter(self, preview=False):
@@ -600,6 +590,8 @@ class Newsletter(object):
         return parameters
 
     def _build_params(self):
+        from plexpy.notification_handler import CustomArrow
+        
         date_format = helpers.momentjs_to_arrow(plexpy.CONFIG.DATE_FORMAT)
 
         if plexpy.CONFIG.NEWSLETTER_SELF_HOSTED and plexpy.CONFIG.HTTP_BASE_URL:
@@ -609,8 +601,8 @@ class Newsletter(object):
 
         parameters = {
             'server_name': helpers.pms_name(),
-            'start_date': self.start_date.format(date_format),
-            'end_date': self.end_date.format(date_format),
+            'start_date': CustomArrow(self.start_date, date_format),
+            'end_date': CustomArrow(self.end_date, date_format),
             'current_year': self.start_date.year,
             'current_month': self.start_date.month,
             'current_day': self.start_date.day,

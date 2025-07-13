@@ -13,20 +13,12 @@
 #  You should have received a copy of the GNU General Public License
 #  along with Tautulli.  If not, see <http://www.gnu.org/licenses/>.
 
-from __future__ import unicode_literals
-from future.builtins import object
-
 import re
 
 import plexpy
-if plexpy.PYTHON2:
-    import database
-    import helpers
-    import logger
-else:
-    from plexpy import database
-    from plexpy import helpers
-    from plexpy import logger
+from plexpy import database
+from plexpy import helpers
+from plexpy import logger
 
 
 class DataTables(object):
@@ -291,7 +283,7 @@ def extract_columns(columns=None, match_columns=None):
     columns_string = columns_string.rstrip(', ')
 
     # We return a dict of the column params
-    # column_string is a comma seperated list of the exact column variables received.
+    # column_string is a comma separated list of the exact column variables received.
     # column_literal is the text before the "as" if we have an "as". Usually a function.
     # column_named is the text after the "as", if we have an "as". Any table prefix is also stripped off.
     #   We use this to match with columns received from the Datatables request.

@@ -1,5 +1,7 @@
 # -*- coding: utf-8 -*-
+from collections import deque
 from datetime import datetime
+from typing import Deque, Set, Tuple, Union
 from urllib.parse import parse_qsl, quote, quote_plus, unquote, urlencode, urlsplit
 
 from plexapi import media, settings, utils
@@ -12,8 +14,8 @@ class AdvancedSettingsMixin:
 
     def preferences(self):
         """ Returns a list of :class:`~plexapi.settings.Preferences` objects. """
-        data = self._server.query(self._details_key)
-        return self.findItems(data, settings.Preferences, rtag='Preferences')
+        key = f'{self.key}?includePreferences=1'
+        return self.fetchItems(key, cls=settings.Preferences, rtag='Preferences')
 
     def preference(self, pref):
         """ Returns a :class:`~plexapi.settings.Preferences` object for the specified pref.
@@ -61,63 +63,96 @@ class AdvancedSettingsMixin:
 
 
 class SmartFilterMixin:
-    """ Mixing for Plex objects that can have smart filters. """
+    """ Mixin for Plex objects that can have smart filters. """
+
+    def _parseFilterGroups(self, feed: Deque[Tuple[str, str]], returnOn: Union[Set[str], None] = None) -> dict:
+        """ Parse filter groups from input lines between push and pop. """
+        currentFiltersStack: list[dict] = []
+        operatorForStack = None
+        if returnOn is None:
+            returnOn = set("pop")
+        else:
+            returnOn.add("pop")
+        allowedLogicalOperators = ["and", "or"]  # first is the default
+
+        while feed:
+            key, value = feed.popleft()  # consume the first item
+            if key == "push":
+                # recurse and add the result to the current stack
+                currentFiltersStack.append(
+                    self._parseFilterGroups(feed, returnOn)
+                )
+            elif key in returnOn:
+                # stop iterating and return the current stack
+                if not key == "pop":
+                    feed.appendleft((key, value))  # put the item back
+                break
+
+            elif key in allowedLogicalOperators:
+                # set the operator
+                if operatorForStack and not operatorForStack == key:
+                    raise ValueError(
+                        "cannot have different logical operators for the same"
+                        " filter group"
+                    )
+                operatorForStack = key
+
+            else:
+                # add the key value pair to the current filter
+                currentFiltersStack.append({key: value})
+
+        if not operatorForStack and len(currentFiltersStack) > 1:
+            # consider 'and' as the default operator
+            operatorForStack = allowedLogicalOperators[0]
+
+        if operatorForStack:
+            return {operatorForStack: currentFiltersStack}
+        return currentFiltersStack.pop()
+
+    def _parseQueryFeed(self, feed: "deque[Tuple[str, str]]") -> dict:
+        """ Parse the query string into a dict. """
+        filtersDict = {}
+        special_keys = {"type", "sort"}
+        integer_keys = {"includeGuids", "limit"}
+        as_is_keys = {"group", "having"}
+        reserved_keys = special_keys | integer_keys | as_is_keys
+        while feed:
+            key, value = feed.popleft()
+            if key in integer_keys:
+                filtersDict[key] = int(value)
+            elif key in as_is_keys:
+                filtersDict[key] = value
+            elif key == "type":
+                filtersDict["libtype"] = utils.reverseSearchType(value)
+            elif key == "sort":
+                filtersDict["sort"] = value.split(",")
+            else:
+                feed.appendleft((key, value))  # put the item back
+                filter_group = self._parseFilterGroups(
+                    feed, returnOn=reserved_keys
+                )
+                if "filters" in filtersDict:
+                    filtersDict["filters"] = {
+                        "and": [filtersDict["filters"], filter_group]
+                    }
+                else:
+                    filtersDict["filters"] = filter_group
+
+        return filtersDict
 
     def _parseFilters(self, content):
         """ Parse the content string and returns the filter dict. """
         content = urlsplit(unquote(content))
-        filters = {}
-        filterOp = 'and'
-        filterGroups = [[]]
+        feed = deque()
 
         for key, value in parse_qsl(content.query):
             # Move = sign to key when operator is ==
-            if value.startswith('='):
-                key += '='
-                value = value[1:]
+            if value.startswith("="):
+                key, value = f"{key}=", value[1:]
 
-            if key == 'includeGuids':
-                filters['includeGuids'] = int(value)
-            elif key == 'type':
-                filters['libtype'] = utils.reverseSearchType(value)
-            elif key == 'sort':
-                filters['sort'] = value.split(',')
-            elif key == 'limit':
-                filters['limit'] = int(value)
-            elif key == 'push':
-                filterGroups[-1].append([])
-                filterGroups.append(filterGroups[-1][-1])
-            elif key == 'and':
-                filterOp = 'and'
-            elif key == 'or':
-                filterOp = 'or'
-            elif key == 'pop':
-                filterGroups[-1].insert(0, filterOp)
-                filterGroups.pop()
-            else:
-                filterGroups[-1].append({key: value})
+            feed.append((key, value))
 
-        if filterGroups:
-            filters['filters'] = self._formatFilterGroups(filterGroups.pop())
-        return filters
-
-    def _formatFilterGroups(self, groups):
-        """ Formats the filter groups into the advanced search rules. """
-        if len(groups) == 1 and isinstance(groups[0], list):
-            groups = groups.pop()
-
-        filterOp = 'and'
-        rules = []
-
-        for g in groups:
-            if isinstance(g, list):
-                rules.append(self._formatFilterGroups(g))
-            elif isinstance(g, dict):
-                rules.append(g)
-            elif g in {'and', 'or'}:
-                filterOp = g
-
-        return {filterOp: rules}
+        return self._parseQueryFeed(feed)
 
 
 class SplitMergeMixin:
@@ -205,8 +240,7 @@ class UnmatchMatchMixin:
                     params['agent'] = utils.getAgentIdentifier(self.section(), agent)
 
         key = key + '?' + urlencode(params)
-        data = self._server.query(key, method=self._server._session.get)
-        return self.findItems(data, initpath=key)
+        return self.fetchItems(key, cls=media.SearchResult)
 
     def fixMatch(self, searchResult=None, auto=False, agent=None):
         """ Use match result to update show metadata.
@@ -243,8 +277,8 @@ class ExtrasMixin:
     def extras(self):
         """ Returns a list of :class:`~plexapi.video.Extra` objects. """
         from plexapi.video import Extra
-        data = self._server.query(self._details_key)
-        return self.findItems(data, Extra, rtag='Extras')
+        key = f'{self.key}/extras'
+        return self.fetchItems(key, cls=Extra)
 
 
 class HubsMixin:
@@ -254,8 +288,7 @@ class HubsMixin:
         """ Returns a list of :class:`~plexapi.library.Hub` objects. """
         from plexapi.library import Hub
         key = f'{self.key}/related'
-        data = self._server.query(key)
-        return self.findItems(data, Hub)
+        return self.fetchItems(key, cls=Hub)
 
 
 class PlayedUnplayedMixin:
@@ -281,19 +314,16 @@ class PlayedUnplayedMixin:
         return self
 
     @property
-    @deprecated('use "isPlayed" instead', stacklevel=3)
     def isWatched(self):
-        """ Returns True if the show is watched. """
+        """ Alias to self.isPlayed. """
         return self.isPlayed
 
-    @deprecated('use "markPlayed" instead')
     def markWatched(self):
-        """ Mark the video as played. """
+        """ Alias to :func:`~plexapi.mixins.PlayedUnplayedMixin.markPlayed`. """
         self.markPlayed()
 
-    @deprecated('use "markUnplayed" instead')
     def markUnwatched(self):
-        """ Mark the video as unplayed. """
+        """ Alias to :func:`~plexapi.mixins.PlayedUnplayedMixin.markUnplayed`. """
         self.markUnplayed()
 
 
@@ -371,6 +401,63 @@ class ArtMixin(ArtUrlMixin, ArtLockMixin):
         """
         art.select()
         return self
+
+
+class LogoUrlMixin:
+    """ Mixin for Plex objects that can have a logo url. """
+
+    @property
+    def logoUrl(self):
+        """ Return the logo url for the Plex object. """
+        image = next((i for i in self.images if i.type == 'clearLogo'), None)
+        return self._server.url(image.url, includeToken=True) if image else None
+
+
+class LogoLockMixin:
+    """ Mixin for Plex objects that can have a locked logo. """
+
+    def lockLogo(self):
+        """ Lock the logo for a Plex object. """
+        raise NotImplementedError('Logo cannot be locked through the API.')
+
+    def unlockLogo(self):
+        """ Unlock the logo for a Plex object. """
+        raise NotImplementedError('Logo cannot be unlocked through the API.')
+
+
+class LogoMixin(LogoUrlMixin, LogoLockMixin):
+    """ Mixin for Plex objects that can have logos. """
+
+    def logos(self):
+        """ Returns list of available :class:`~plexapi.media.Logo` objects. """
+        return self.fetchItems(f'/library/metadata/{self.ratingKey}/clearLogos', cls=media.Logo)
+
+    def uploadLogo(self, url=None, filepath=None):
+        """ Upload a logo from a url or filepath.
+
+            Parameters:
+                url (str): The full URL to the image to upload.
+                filepath (str): The full file path the the image to upload or file-like object.
+        """
+        if url:
+            key = f'/library/metadata/{self.ratingKey}/clearLogos?url={quote_plus(url)}'
+            self._server.query(key, method=self._server._session.post)
+        elif filepath:
+            key = f'/library/metadata/{self.ratingKey}/clearLogos'
+            data = openOrRead(filepath)
+            self._server.query(key, method=self._server._session.post, data=data)
+        return self
+
+    def setLogo(self, logo):
+        """ Set the logo for a Plex object.
+
+            Raises:
+                :exc:`~plexapi.exceptions.NotImplementedError`: Logo cannot be set through the API.
+        """
+        raise NotImplementedError(
+            'Logo cannot be set through the API. '
+            'Re-upload the logo using "uploadLogo" to set it.'
+        )
 
 
 class PosterUrlMixin:
@@ -483,6 +570,11 @@ class ThemeMixin(ThemeUrlMixin, ThemeLockMixin):
         return self
 
     def setTheme(self, theme):
+        """ Set the theme for a Plex object.
+
+            Raises:
+                :exc:`~plexapi.exceptions.NotImplementedError`: Themes cannot be set through the API.
+        """
         raise NotImplementedError(
             'Themes cannot be set through the API. '
             'Re-upload the theme using "uploadTheme" to set it.'
@@ -535,6 +627,19 @@ class AddedAtMixin(EditFieldMixin):
         return self.editField('addedAt', addedAt, locked=locked)
 
 
+class AudienceRatingMixin(EditFieldMixin):
+    """ Mixin for Plex objects that can have an audience rating. """
+
+    def editAudienceRating(self, audienceRating, locked=True):
+        """ Edit the audience rating.
+
+            Parameters:
+                audienceRating (float): The new value.
+                locked (bool): True (default) to lock the field, False to unlock the field.
+        """
+        return self.editField('audienceRating', audienceRating, locked=locked)
+
+
 class ContentRatingMixin(EditFieldMixin):
     """ Mixin for Plex objects that can have a content rating. """
 
@@ -546,6 +651,19 @@ class ContentRatingMixin(EditFieldMixin):
                 locked (bool): True (default) to lock the field, False to unlock the field.
         """
         return self.editField('contentRating', contentRating, locked=locked)
+
+
+class CriticRatingMixin(EditFieldMixin):
+    """ Mixin for Plex objects that can have a critic rating. """
+
+    def editCriticRating(self, criticRating, locked=True):
+        """ Edit the critic rating.
+
+            Parameters:
+                criticRating (float): The new value.
+                locked (bool): True (default) to lock the field, False to unlock the field.
+        """
+        return self.editField('rating', criticRating, locked=locked)
 
 
 class EditionTitleMixin(EditFieldMixin):
@@ -719,7 +837,7 @@ class UserRatingMixin(EditFieldMixin):
         """ Edit the user rating.
 
             Parameters:
-                userRating (int): The new value.
+                userRating (float): The new value.
                 locked (bool): True (default) to lock the field, False to unlock the field.
         """
         return self.editField('userRating', userRating, locked=locked)
@@ -755,7 +873,8 @@ class EditTagsMixin:
 
         if not remove:
             tags = getattr(self, self._tagPlural(tag), [])
-            items = tags + items
+            if isinstance(tags, list):
+                items = tags + items
 
         edits = self._tagHelper(self._tagSingular(tag), items, locked, remove)
         edits.update(kwargs)
@@ -1112,7 +1231,8 @@ class WatchlistMixin:
 
 class MovieEditMixins(
     ArtLockMixin, PosterLockMixin, ThemeLockMixin,
-    AddedAtMixin, ContentRatingMixin, EditionTitleMixin, OriginallyAvailableMixin, OriginalTitleMixin, SortTitleMixin,
+    AddedAtMixin, AudienceRatingMixin, ContentRatingMixin, CriticRatingMixin, EditionTitleMixin,
+    OriginallyAvailableMixin, OriginalTitleMixin, SortTitleMixin,
     StudioMixin, SummaryMixin, TaglineMixin, TitleMixin, UserRatingMixin,
     CollectionMixin, CountryMixin, DirectorMixin, GenreMixin, LabelMixin, ProducerMixin, WriterMixin
 ):
@@ -1121,7 +1241,8 @@ class MovieEditMixins(
 
 class ShowEditMixins(
     ArtLockMixin, PosterLockMixin, ThemeLockMixin,
-    AddedAtMixin, ContentRatingMixin, OriginallyAvailableMixin, OriginalTitleMixin, SortTitleMixin, StudioMixin,
+    AddedAtMixin, AudienceRatingMixin, ContentRatingMixin, CriticRatingMixin,
+    OriginallyAvailableMixin, OriginalTitleMixin, SortTitleMixin, StudioMixin,
     SummaryMixin, TaglineMixin, TitleMixin, UserRatingMixin,
     CollectionMixin, GenreMixin, LabelMixin,
 ):
@@ -1130,7 +1251,8 @@ class ShowEditMixins(
 
 class SeasonEditMixins(
     ArtLockMixin, PosterLockMixin, ThemeLockMixin,
-    AddedAtMixin, SummaryMixin, TitleMixin, UserRatingMixin,
+    AddedAtMixin, AudienceRatingMixin, CriticRatingMixin,
+    SummaryMixin, TitleMixin, UserRatingMixin,
     CollectionMixin, LabelMixin
 ):
     pass
@@ -1138,7 +1260,8 @@ class SeasonEditMixins(
 
 class EpisodeEditMixins(
     ArtLockMixin, PosterLockMixin, ThemeLockMixin,
-    AddedAtMixin, ContentRatingMixin, OriginallyAvailableMixin, SortTitleMixin, SummaryMixin, TitleMixin, UserRatingMixin,
+    AddedAtMixin, AudienceRatingMixin, ContentRatingMixin, CriticRatingMixin,
+    OriginallyAvailableMixin, SortTitleMixin, SummaryMixin, TitleMixin, UserRatingMixin,
     CollectionMixin, DirectorMixin, LabelMixin, WriterMixin
 ):
     pass
@@ -1146,7 +1269,8 @@ class EpisodeEditMixins(
 
 class ArtistEditMixins(
     ArtLockMixin, PosterLockMixin, ThemeLockMixin,
-    AddedAtMixin, SortTitleMixin, SummaryMixin, TitleMixin, UserRatingMixin,
+    AddedAtMixin, AudienceRatingMixin, CriticRatingMixin,
+    SortTitleMixin, SummaryMixin, TitleMixin, UserRatingMixin,
     CollectionMixin, CountryMixin, GenreMixin, LabelMixin, MoodMixin, SimilarArtistMixin, StyleMixin
 ):
     pass
@@ -1154,7 +1278,8 @@ class ArtistEditMixins(
 
 class AlbumEditMixins(
     ArtLockMixin, PosterLockMixin, ThemeLockMixin,
-    AddedAtMixin, OriginallyAvailableMixin, SortTitleMixin, StudioMixin, SummaryMixin, TitleMixin, UserRatingMixin,
+    AddedAtMixin, AudienceRatingMixin, CriticRatingMixin,
+    OriginallyAvailableMixin, SortTitleMixin, StudioMixin, SummaryMixin, TitleMixin, UserRatingMixin,
     CollectionMixin, GenreMixin, LabelMixin, MoodMixin, StyleMixin
 ):
     pass
@@ -1162,8 +1287,9 @@ class AlbumEditMixins(
 
 class TrackEditMixins(
     ArtLockMixin, PosterLockMixin, ThemeLockMixin,
-    AddedAtMixin, TitleMixin, TrackArtistMixin, TrackNumberMixin, TrackDiscNumberMixin, UserRatingMixin,
-    CollectionMixin, LabelMixin, MoodMixin
+    AddedAtMixin, AudienceRatingMixin, CriticRatingMixin,
+    TitleMixin, TrackArtistMixin, TrackNumberMixin, TrackDiscNumberMixin, UserRatingMixin,
+    CollectionMixin, GenreMixin, LabelMixin, MoodMixin
 ):
     pass
 
@@ -1185,7 +1311,15 @@ class PhotoEditMixins(
 
 class CollectionEditMixins(
     ArtLockMixin, PosterLockMixin, ThemeLockMixin,
-    AddedAtMixin, ContentRatingMixin, SortTitleMixin, SummaryMixin, TitleMixin, UserRatingMixin,
+    AddedAtMixin, AudienceRatingMixin, ContentRatingMixin, CriticRatingMixin,
+    SortTitleMixin, SummaryMixin, TitleMixin, UserRatingMixin,
     LabelMixin
+):
+    pass
+
+
+class PlaylistEditMixins(
+    ArtLockMixin, PosterLockMixin,
+    SortTitleMixin, SummaryMixin, TitleMixin
 ):
     pass

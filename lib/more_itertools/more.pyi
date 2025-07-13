@@ -1,5 +1,8 @@
 """Stubs for more_itertools.more"""
+
 from __future__ import annotations
+
+import sys
 
 from types import TracebackType
 from typing import (
@@ -9,8 +12,10 @@ from typing import (
     ContextManager,
     Generic,
     Hashable,
+    Mapping,
     Iterable,
     Iterator,
+    Mapping,
     overload,
     Reversible,
     Sequence,
@@ -25,12 +30,21 @@ from typing_extensions import Protocol
 _T = TypeVar('_T')
 _T1 = TypeVar('_T1')
 _T2 = TypeVar('_T2')
+_T3 = TypeVar('_T3')
+_T4 = TypeVar('_T4')
+_T5 = TypeVar('_T5')
 _U = TypeVar('_U')
 _V = TypeVar('_V')
 _W = TypeVar('_W')
 _T_co = TypeVar('_T_co', covariant=True)
-_GenFn = TypeVar('_GenFn', bound=Callable[..., Iterator[object]])
+_GenFn = TypeVar('_GenFn', bound=Callable[..., Iterator[Any]])
 _Raisable = BaseException | Type[BaseException]
+
+# The type of isinstance's second argument (from typeshed builtins)
+if sys.version_info >= (3, 10):
+    _ClassInfo = type | UnionType | tuple[_ClassInfo, ...]
+else:
+    _ClassInfo = type | tuple[_ClassInfo, ...]
 
 @type_check_only
 class _SizedIterable(Protocol[_T_co], Sized, Iterable[_T_co]): ...
@@ -74,7 +88,7 @@ class peekable(Generic[_T], Iterator[_T]):
     def __getitem__(self, index: slice) -> list[_T]: ...
 
 def consumer(func: _GenFn) -> _GenFn: ...
-def ilen(iterable: Iterable[object]) -> int: ...
+def ilen(iterable: Iterable[_T]) -> int: ...
 def iterate(func: Callable[[_T], _T], start: _T) -> Iterator[_T]: ...
 def with_iter(
     context_manager: ContextManager[Iterable[_T]],
@@ -116,7 +130,7 @@ class bucket(Generic[_T, _U], Container[_U]):
         self,
         iterable: Iterable[_T],
         key: Callable[[_T], _U],
-        validator: Callable[[object], object] | None = ...,
+        validator: Callable[[_U], object] | None = ...,
     ) -> None: ...
     def __contains__(self, value: object) -> bool: ...
     def __iter__(self) -> Iterator[_U]: ...
@@ -132,7 +146,7 @@ def interleave_evenly(
 ) -> Iterator[_T]: ...
 def collapse(
     iterable: Iterable[Any],
-    base_type: type | None = ...,
+    base_type: _ClassInfo | None = ...,
     levels: int | None = ...,
 ) -> Iterator[Any]: ...
 @overload
@@ -210,6 +224,7 @@ def stagger(
 class UnequalIterablesError(ValueError):
     def __init__(self, details: tuple[int, int, int] | None = ...) -> None: ...
 
+# zip_equal
 @overload
 def zip_equal(__iter1: Iterable[_T1]) -> Iterator[tuple[_T1]]: ...
 @overload
@@ -218,11 +233,35 @@ def zip_equal(
 ) -> Iterator[tuple[_T1, _T2]]: ...
 @overload
 def zip_equal(
-    __iter1: Iterable[_T],
-    __iter2: Iterable[_T],
-    __iter3: Iterable[_T],
-    *iterables: Iterable[_T],
-) -> Iterator[tuple[_T, ...]]: ...
+    __iter1: Iterable[_T1], __iter2: Iterable[_T2], __iter3: Iterable[_T3]
+) -> Iterator[tuple[_T1, _T2, _T3]]: ...
+@overload
+def zip_equal(
+    __iter1: Iterable[_T1],
+    __iter2: Iterable[_T2],
+    __iter3: Iterable[_T3],
+    __iter4: Iterable[_T4],
+) -> Iterator[tuple[_T1, _T2, _T3, _T4]]: ...
+@overload
+def zip_equal(
+    __iter1: Iterable[_T1],
+    __iter2: Iterable[_T2],
+    __iter3: Iterable[_T3],
+    __iter4: Iterable[_T4],
+    __iter5: Iterable[_T5],
+) -> Iterator[tuple[_T1, _T2, _T3, _T4, _T5]]: ...
+@overload
+def zip_equal(
+    __iter1: Iterable[Any],
+    __iter2: Iterable[Any],
+    __iter3: Iterable[Any],
+    __iter4: Iterable[Any],
+    __iter5: Iterable[Any],
+    __iter6: Iterable[Any],
+    *iterables: Iterable[Any],
+) -> Iterator[tuple[Any, ...]]: ...
+
+# zip_offset
 @overload
 def zip_offset(
     __iter1: Iterable[_T1],
@@ -282,12 +321,13 @@ def sort_together(
     key_list: Iterable[int] = ...,
     key: Callable[..., Any] | None = ...,
     reverse: bool = ...,
+    strict: bool = ...,
 ) -> list[tuple[_T, ...]]: ...
 def unzip(iterable: Iterable[Sequence[_T]]) -> tuple[Iterator[_T], ...]: ...
 def divide(n: int, iterable: Iterable[_T]) -> list[Iterator[_T]]: ...
 def always_iterable(
     obj: object,
-    base_type: type | tuple[type | tuple[Any, ...], ...] | None = ...,
+    base_type: _ClassInfo | None = ...,
 ) -> Iterator[Any]: ...
 def adjacent(
     predicate: Callable[[_T], bool],
@@ -383,7 +423,7 @@ def mark_ends(
     iterable: Iterable[_T],
 ) -> Iterable[tuple[bool, bool, _T]]: ...
 def locate(
-    iterable: Iterable[object],
+    iterable: Iterable[_T],
     pred: Callable[..., Any] = ...,
     window_size: int | None = ...,
 ) -> Iterator[int]: ...
@@ -451,7 +491,9 @@ class run_length:
 def exactly_n(
     iterable: Iterable[_T], n: int, predicate: Callable[[_T], object] = ...
 ) -> bool: ...
-def circular_shifts(iterable: Iterable[_T]) -> list[tuple[_T, ...]]: ...
+def circular_shifts(
+    iterable: Iterable[_T], steps: int = 1
+) -> list[tuple[_T, ...]]: ...
 def make_decorator(
     wrapping_func: Callable[..., _U], result_index: int = ...
 ) -> Callable[..., Callable[[Callable[..., Any]], Callable[..., _U]]]: ...
@@ -497,7 +539,10 @@ def replace(
 ) -> Iterator[_T | _U]: ...
 def partitions(iterable: Iterable[_T]) -> Iterator[list[list[_T]]]: ...
 def set_partitions(
-    iterable: Iterable[_T], k: int | None = ...
+    iterable: Iterable[_T],
+    k: int | None = ...,
+    min_size: int | None = ...,
+    max_size: int | None = ...,
 ) -> Iterator[list[list[_T]]]: ...
 
 class time_limited(Generic[_T], Iterator[_T]):
@@ -535,10 +580,22 @@ def map_if(
     func: Callable[[Any], Any],
     func_else: Callable[[Any], Any] | None = ...,
 ) -> Iterator[Any]: ...
+def _sample_unweighted(
+    iterator: Iterator[_T], k: int, strict: bool
+) -> list[_T]: ...
+def _sample_counted(
+    population: Iterator[_T], k: int, counts: Iterable[int], strict: bool
+) -> list[_T]: ...
+def _sample_weighted(
+    iterator: Iterator[_T], k: int, weights, strict
+) -> list[_T]: ...
 def sample(
     iterable: Iterable[_T],
     k: int,
     weights: Iterable[float] | None = ...,
+    *,
+    counts: Iterable[int] | None = ...,
+    strict: bool = False,
 ) -> list[_T]: ...
 def is_sorted(
     iterable: Iterable[_T],
@@ -574,7 +631,7 @@ class callback_iter(Generic[_T], Iterator[_T]):
 
 def windowed_complete(
     iterable: Iterable[_T], n: int
-) -> Iterator[tuple[_T, ...]]: ...
+) -> Iterator[tuple[tuple[_T, ...], tuple[_T, ...], tuple[_T, ...]]]: ...
 def all_unique(
     iterable: Iterable[_T], key: Callable[[_T], _U] | None = ...
 ) -> bool: ...
@@ -602,11 +659,64 @@ class countable(Generic[_T], Iterator[_T]):
     def __init__(self, iterable: Iterable[_T]) -> None: ...
     def __iter__(self) -> countable[_T]: ...
     def __next__(self) -> _T: ...
+    items_seen: int
 
 def chunked_even(iterable: Iterable[_T], n: int) -> Iterator[list[_T]]: ...
+@overload
 def zip_broadcast(
+    __obj1: _T | Iterable[_T],
+    *,
+    scalar_types: _ClassInfo | None = ...,
+    strict: bool = ...,
+) -> Iterable[tuple[_T, ...]]: ...
+@overload
+def zip_broadcast(
+    __obj1: _T | Iterable[_T],
+    __obj2: _T | Iterable[_T],
+    *,
+    scalar_types: _ClassInfo | None = ...,
+    strict: bool = ...,
+) -> Iterable[tuple[_T, ...]]: ...
+@overload
+def zip_broadcast(
+    __obj1: _T | Iterable[_T],
+    __obj2: _T | Iterable[_T],
+    __obj3: _T | Iterable[_T],
+    *,
+    scalar_types: _ClassInfo | None = ...,
+    strict: bool = ...,
+) -> Iterable[tuple[_T, ...]]: ...
+@overload
+def zip_broadcast(
+    __obj1: _T | Iterable[_T],
+    __obj2: _T | Iterable[_T],
+    __obj3: _T | Iterable[_T],
+    __obj4: _T | Iterable[_T],
+    *,
+    scalar_types: _ClassInfo | None = ...,
+    strict: bool = ...,
+) -> Iterable[tuple[_T, ...]]: ...
+@overload
+def zip_broadcast(
+    __obj1: _T | Iterable[_T],
+    __obj2: _T | Iterable[_T],
+    __obj3: _T | Iterable[_T],
+    __obj4: _T | Iterable[_T],
+    __obj5: _T | Iterable[_T],
+    *,
+    scalar_types: _ClassInfo | None = ...,
+    strict: bool = ...,
+) -> Iterable[tuple[_T, ...]]: ...
+@overload
+def zip_broadcast(
+    __obj1: _T | Iterable[_T],
+    __obj2: _T | Iterable[_T],
+    __obj3: _T | Iterable[_T],
+    __obj4: _T | Iterable[_T],
+    __obj5: _T | Iterable[_T],
+    __obj6: _T | Iterable[_T],
     *objects: _T | Iterable[_T],
-    scalar_types: type | tuple[type | tuple[Any, ...], ...] | None = ...,
+    scalar_types: _ClassInfo | None = ...,
     strict: bool = ...,
 ) -> Iterable[tuple[_T, ...]]: ...
 def unique_in_window(
@@ -618,6 +728,9 @@ def duplicates_everseen(
 def duplicates_justseen(
     iterable: Iterable[_T], key: Callable[[_T], _U] | None = ...
 ) -> Iterator[_T]: ...
+def classify_unique(
+    iterable: Iterable[_T], key: Callable[[_T], _U] | None = ...
+) -> Iterator[tuple[_T, bool, bool]]: ...
 
 class _SupportsLessThan(Protocol):
     def __lt__(self, __other: Any) -> bool: ...
@@ -662,9 +775,9 @@ def minmax(
 def longest_common_prefix(
     iterables: Iterable[Iterable[_T]],
 ) -> Iterator[_T]: ...
-def iequals(*iterables: Iterable[object]) -> bool: ...
+def iequals(*iterables: Iterable[Any]) -> bool: ...
 def constrained_batches(
-    iterable: Iterable[object],
+    iterable: Iterable[_T],
     max_size: int,
     max_count: int | None = ...,
     get_len: Callable[[_T], object] = ...,
@@ -682,3 +795,21 @@ def outer_product(
     *args: Any,
     **kwargs: Any,
 ) -> Iterator[tuple[_V, ...]]: ...
+def iter_suppress(
+    iterable: Iterable[_T],
+    *exceptions: Type[BaseException],
+) -> Iterator[_T]: ...
+def filter_map(
+    func: Callable[[_T], _V | None],
+    iterable: Iterable[_T],
+) -> Iterator[_V]: ...
+def powerset_of_sets(iterable: Iterable[_T]) -> Iterator[set[_T]]: ...
+def join_mappings(
+    **field_to_map: Mapping[_T, _V]
+) -> dict[_T, dict[str, _V]]: ...
+def doublestarmap(
+    func: Callable[..., _T],
+    iterable: Iterable[Mapping[str, Any]],
+) -> Iterator[_T]: ...
+def dft(xarr: Sequence[complex]) -> Iterator[complex]: ...
+def idft(Xarr: Sequence[complex]) -> Iterator[complex]: ...

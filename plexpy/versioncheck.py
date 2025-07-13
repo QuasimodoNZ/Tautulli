@@ -15,11 +15,6 @@
 #  You should have received a copy of the GNU General Public License
 #  along with Tautulli.  If not, see <http://www.gnu.org/licenses/>.
 
-from __future__ import division
-from __future__ import unicode_literals
-from future.builtins import next
-from future.builtins import str
-
 import json
 import os
 import platform
@@ -29,16 +24,10 @@ import subprocess
 import tarfile
 
 import plexpy
-if plexpy.PYTHON2:
-    import common
-    import helpers
-    import logger
-    import request
-else:
-    from plexpy import common
-    from plexpy import helpers
-    from plexpy import logger
-    from plexpy import request
+from plexpy import common
+from plexpy import helpers
+from plexpy import logger
+from plexpy import request
 
 
 def runGit(args):
@@ -292,10 +281,7 @@ def check_github(scheduler=False, notify=False, use_cache=False):
                                      'plexpy_update_commit': plexpy.LATEST_VERSION,
                                      'plexpy_update_behind': plexpy.COMMITS_BEHIND})
 
-        if plexpy.PYTHON2:
-            logger.warn('Tautulli is running using Python 2. Unable to run automatic update.')
-
-        elif scheduler and plexpy.CONFIG.PLEXPY_AUTO_UPDATE and \
+        if scheduler and plexpy.CONFIG.PLEXPY_AUTO_UPDATE and \
                 not plexpy.DOCKER and not plexpy.SNAP and not plexpy.FROZEN:
             logger.info('Running automatic update.')
             plexpy.shutdown(restart=True, update=True)
@@ -307,10 +293,6 @@ def check_github(scheduler=False, notify=False, use_cache=False):
 
 
 def update():
-    if plexpy.PYTHON2:
-        logger.warn('Tautulli is running using Python 2. Unable to update.')
-        return
-
     if not plexpy.UPDATE_AVAILABLE:
         return
 
@@ -412,6 +394,7 @@ def reset_git_install():
         output, err = runGit('branch -u {}/{}'.format(plexpy.CONFIG.GIT_REMOTE,
                                                       plexpy.CONFIG.GIT_BRANCH))
         output, err = runGit('reset --hard {}'.format(common.RELEASE))
+        _, _ = runGit('clean -fd')
 
         if not output:
             logger.error('Unable to reset Tautulli installation.')
