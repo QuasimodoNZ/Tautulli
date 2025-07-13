@@ -1115,7 +1115,7 @@ def build_media_notify_params(notify_action=None, session=None, timeline=None, m
         'title': notify_params['full_title'],
         'edition_title': notify_params['edition_title'],
         'show_name': show_name,
-        'show_name_slug': show_name.lower().replace(' ', '-').replace('(', '').replace(')', '').replace("'", '').replace('.', '-').rstrip('-'),
+        'show_name_slug': show_name.lower().replace(' ', '-').replace('(', '').replace(')', '').replace("'", '').replace('.', '-').replace(':', '').rstrip('-'),
         'season_name': season_name,
         'episode_name': episode_name,
         'artist_name': artist_name,
