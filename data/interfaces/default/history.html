@@ -128,6 +128,8 @@
 <script src="${http_root}js/tables/history_table.js${cache_param}"></script>
 <script>
     $(document).ready(function () {
+        var selected_user_id = "${_session['user_group']}" == "admin" ? null : "${_session['user_id']}";
+
         // Load user ids and names (for the selector)
         $.ajax({
             url: 'get_user_names',
@@ -166,7 +168,7 @@
             }
         });
 
-        let history_user_last_id = undefined;
+        let history_user_last_id = selected_user_id;
 
         function loadHistoryTable(media_type, transcode_decision, selected_user_id) {
             history_table_options.ajax = {
@@ -179,6 +181,9 @@
                         transcode_decision: transcode_decision,
                         user_id: selected_user_id
                     };
+                },
+                error: function(xhr, error, thrown) {
+                    showMsg('<i class="fa fa-exclamation-triangle"></i> An error occurred while loading table.<br>Please check the logs.', false, false, null, true);
                 }
             };
             history_table = $('#history_table').DataTable(history_table_options);
@@ -223,8 +228,6 @@
                 history_table.draw();
             });
         }
-
-        var selected_user_id = "${_session['user_group']}" == "admin" ? null : "${_session['user_id']}";
 
         var media_type = getLocalStorage('history_media_type', 'all');
         $.each(media_type.split(','), function (i, item) {

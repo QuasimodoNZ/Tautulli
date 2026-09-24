@@ -15,9 +15,11 @@
 #  You should have received a copy of the GNU General Public License
 #  along with Tautulli.  If not, see <http://www.gnu.org/licenses/>.
 
+import json
 import os
 import ssl
 import sys
+from pathlib import Path
 
 import cheroot.errors
 import cherrypy
@@ -26,8 +28,69 @@ import cherrypy_cors
 import plexpy
 from plexpy import logger
 from plexpy import webauth
-from plexpy.helpers import create_https_certificates
+from plexpy.helpers import create_https_certificates, hash_pms_uuid
 from plexpy.webserve import WebInterface, BaseRedirect
+
+
+def _patch_cheroot_makefile():
+    """Patch cheroot makefile to handle socket errors during cleanup.
+
+    When pages are refreshed quickly, sockets can become invalid before
+    the buffer finishes flushing, causing OSError exceptions during cleanup.
+    This patch catches those errors to prevent "Exception ignored in __del__" warnings.
+    """
+    try:
+        import _pyio as io
+        from cheroot import makefile
+
+        def _flush_unlocked_patched(self):
+            """Patched version that handles OSError during socket writes."""
+            self._checkClosed('flush of closed file')
+            while self._write_buf:
+                try:
+                    n = self.raw.write(bytes(self._write_buf))
+                except io.BlockingIOError as e:
+                    n = e.characters_written
+                except OSError:
+                    # Socket is no longer valid (e.g., on rapid page refresh)
+                    # Clear the buffer and exit to avoid exception during cleanup
+                    self._write_buf.clear()
+                    break
+                del self._write_buf[:n]
+
+        makefile.BufferedWriter._flush_unlocked = _flush_unlocked_patched
+    except Exception:
+        pass
+
+
+def _patch_cherrypy_cors_preflight():
+    """Monkey patch vendored cherrypy_cors preflight validation.
+
+    The vendored cherrypy_cors implementation compares the requested
+    method and request headers using exact case, which can cause valid
+    preflight requests to fail and drop the CORS preflight headers.
+    """
+    try:
+        cors_cls = cherrypy_cors.CORS
+    except AttributeError:
+        return
+
+    def _has_valid_method(self, allowed_methods):
+        return (
+            self.requested_method
+            and self.requested_method.upper() in [method.upper() for method in allowed_methods]
+        )
+
+    def _valid_headers(self, allowed_headers):
+        if self.requested_headers and allowed_headers:
+            allowed_headers = [header.lower() for header in allowed_headers]
+            for header in self.requested_headers.split(','):
+                if header.strip().lower() not in allowed_headers:
+                    return False
+        return True
+
+    cors_cls._has_valid_method = _has_valid_method
+    cors_cls._valid_headers = _valid_headers
 
 
 def start():
@@ -63,7 +126,12 @@ def restart():
 
 
 def initialize(options):
+    # Monkey-patch vendored cherrypy_cors preflight validation to handle case-insensitive method and header checks
+    _patch_cherrypy_cors_preflight()
     cherrypy_cors.install()
+
+    # Monkey-patch cheroot makefile to handle socket errors during cleanup
+    _patch_cheroot_makefile()
 
     # HTTPS stuff stolen from sickbeard
     enable_https = options['enable_https']
@@ -94,7 +162,6 @@ def initialize(options):
         'tools.encode.on': True,
         'tools.encode.encoding': 'utf-8',
         'tools.decode.on': True,
-        'cors.expose.on': True,
     }
 
     if plexpy.DEV:
@@ -150,35 +217,53 @@ def initialize(options):
     else:
         plexpy.HTTP_ROOT = options['http_root'] = '/'
 
+    cherrypy.tools.csrf = cherrypy.Tool('before_handler', webauth.check_csrf_token, priority=3)
+    cherrypy.tools.secheaders = cherrypy.Tool('before_finalize', set_security_headers)
+
     logger.info("Tautulli WebStart :: Thread Pool Size: %d.", plexpy.CONFIG.HTTP_THREAD_POOL)
     cherrypy.config.update(options_dict)
 
     conf = {
         '/': {
-            'engine.timeout_monitor.on': False,
             'tools.staticdir.root': os.path.join(plexpy.PROG_DIR, 'data'),
             'tools.proxy.on': bool(options['http_proxy']),
             'tools.gzip.on': True,
             'tools.gzip.mime_types': ['text/html', 'text/plain', 'text/css',
                                       'text/javascript', 'application/json',
                                       'application/javascript'],
+            'tools.sessions.on': True,
+            'tools.sessions.name': f'tautulli_session_{hash_pms_uuid()}',
+            # 'early' locking holds an exclusive per-session lock for the
+            # entire duration of every request, serializing all parallel
+            # requests from the same browser (graph XHRs, poster images).
+            # The session is only ever written when the CSRF token is set;
+            # those sites call acquire_lock() explicitly.
+            'tools.sessions.locking': 'explicit',
             'tools.auth.on': plexpy.AUTH_ENABLED,
             'tools.auth_basic.on': basic_auth_enabled,
             'tools.auth_basic.realm': 'Tautulli web server',
             'tools.auth_basic.checkpassword': cherrypy.lib.auth_basic.checkpassword_dict({
-                options['http_username']: options['http_password']})
+                options['http_username']: options['http_password']}),
+            'tools.csrf.on': True,
+            'tools.secheaders.on': True,
+            'error_page.default': error_page,
+            'cors.expose.on': True,
         },
         '/api': {
-            'tools.auth_basic.on': False
+            'tools.auth_basic.on': False,
+            'tools.sessions.on': False,
         },
         '/status': {
-            'tools.auth_basic.on': False
+            'tools.auth_basic.on': False,
+            'tools.sessions.on': True,
         },
         '/newsletter': {
-            'tools.auth_basic.on': False
+            'tools.auth_basic.on': False,
+            'tools.sessions.on': True,
         },
         '/image': {
-            'tools.auth_basic.on': False
+            'tools.auth_basic.on': False,
+            'tools.sessions.on': True,
         },
         '/interfaces': {
             'tools.staticdir.on': True,
@@ -189,7 +274,7 @@ def initialize(options):
             'tools.expires.on': True,
             'tools.expires.secs': 60 * 60 * 24 * 30,  # 30 days
             'tools.sessions.on': False,
-            'tools.auth.on': False
+            'tools.auth.on': False,
         },
         '/images': {
             'tools.staticdir.on': True,
@@ -201,7 +286,7 @@ def initialize(options):
             'tools.expires.on': True,
             'tools.expires.secs': 60 * 60 * 24 * 30,  # 30 days
             'tools.sessions.on': False,
-            'tools.auth.on': False
+            'tools.auth.on': False,
         },
         '/css': {
             'tools.staticdir.on': True,
@@ -212,7 +297,7 @@ def initialize(options):
             'tools.expires.on': True,
             'tools.expires.secs': 60 * 60 * 24 * 30,  # 30 days
             'tools.sessions.on': False,
-            'tools.auth.on': False
+            'tools.auth.on': False,
         },
         '/fonts': {
             'tools.staticdir.on': True,
@@ -223,7 +308,7 @@ def initialize(options):
             'tools.expires.on': True,
             'tools.expires.secs': 60 * 60 * 24 * 30,  # 30 days
             'tools.sessions.on': False,
-            'tools.auth.on': False
+            'tools.auth.on': False,
         },
         '/js': {
             'tools.staticdir.on': True,
@@ -234,27 +319,7 @@ def initialize(options):
             'tools.expires.on': True,
             'tools.expires.secs': 60 * 60 * 24 * 30,  # 30 days
             'tools.sessions.on': False,
-            'tools.auth.on': False
-        },
-        '/cache': {
-            'tools.staticdir.on': True,
-            'tools.staticdir.dir': plexpy.CONFIG.CACHE_DIR,
-            'tools.caching.on': True,
-            'tools.caching.force': True,
-            'tools.caching.delay': 0,
-            'tools.expires.on': True,
-            'tools.expires.secs': 60 * 60 * 24 * 30,  # 30 days
-            'tools.sessions.on': False,
-            'tools.auth.on': False
-        },
-        '/pms_image_proxy': {
-           'tools.caching.on': True,
-           'tools.caching.force': True,
-           'tools.caching.delay': 0,
-           'tools.expires.on': True,
-           'tools.expires.secs': 60 * 60 * 24 * 30,  # 30 days
-           'tools.auth.on': False,
-           'tools.sessions.on': False
+            'tools.auth.on': False,
         },
         '/favicon.ico': {
             'tools.staticfile.on': True,
@@ -266,7 +331,7 @@ def initialize(options):
             'tools.expires.on': True,
             'tools.expires.secs': 60 * 60 * 24 * 30,  # 30 days
             'tools.sessions.on': False,
-            'tools.auth.on': False
+            'tools.auth.on': False,
         }
     }
 
@@ -284,7 +349,6 @@ def initialize(options):
     try:
         logger.info("Tautulli WebStart :: Starting Tautulli web server on %s://%s:%d%s", protocol,
                     options['http_host'], options['http_port'], options['http_root'])
-        #cherrypy.process.servers.check_port(str(options['http_host']), options['http_port'])
         if not plexpy.DEV:
             cherrypy.server.start()
         else:
@@ -299,14 +363,12 @@ def initialize(options):
     cherrypy.server.wait()
 
 
-def proxy():
-    # logger.debug("REQUEST URI: %s, HEADER [X-Forwarded-Host]: %s, [X-Host]: %s, [Origin]: %s, [Host]: %s",
-    #              cherrypy.request.wsgi_environ['REQUEST_URI'],
-    #              cherrypy.request.headers.get('X-Forwarded-Host'),
-    #              cherrypy.request.headers.get('X-Host'),
-    #              cherrypy.request.headers.get('Origin'),
-    #              cherrypy.request.headers.get('Host'))
+def error_page(status, message, traceback, version):
+    cherrypy.response.headers['Content-Type'] = 'application/json'
+    return json.dumps({"status": status, "message": message, "error": True}).encode('utf-8')
 
+
+def proxy():
     # Change cherrpy.tools.proxy.local header if X-Forwarded-Host header is not present
     local = 'X-Forwarded-Host'
     if not cherrypy.request.headers.get('X-Forwarded-Host'):
@@ -316,7 +378,13 @@ def proxy():
             local = 'Origin'
         elif cherrypy.request.headers.get('Host'):  # nginx
             local = 'Host'
-        # logger.debug("cherrypy.tools.proxy.local set to [%s]", local)
 
     # Call original cherrypy proxy tool with the new local
     cherrypy.lib.cptools.proxy(local=local)
+
+
+def set_security_headers():
+    headers = cherrypy.response.headers
+    headers['X-Content-Type-Options'] = 'nosniff'
+    headers['X-Frame-Options'] = plexpy.CONFIG.X_FRAME_OPTIONS
+    headers['Referrer-Policy'] = 'strict-origin-when-cross-origin'

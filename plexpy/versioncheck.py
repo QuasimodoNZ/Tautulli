@@ -46,8 +46,8 @@ def runGit(args):
         cmd = cur_git + ' ' + args
 
         try:
-            logger.debug('Trying to execute: "' + cmd + '" with shell in ' + plexpy.PROG_DIR)
-            p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, shell=True, cwd=plexpy.PROG_DIR)
+            logger.debug('Trying to execute: "' + cmd + '" in ' + plexpy.PROG_DIR)
+            p = subprocess.Popen(helpers.split_args(cmd), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, cwd=plexpy.PROG_DIR)
             output, err = p.communicate()
             output = output.strip().decode()
 
@@ -293,9 +293,6 @@ def check_github(scheduler=False, notify=False, use_cache=False):
 
 
 def update():
-    if not plexpy.UPDATE_AVAILABLE:
-        return
-
     if plexpy.INSTALL_TYPE in ('docker', 'snap', 'windows', 'macos'):
         return
 
@@ -315,6 +312,7 @@ def update():
                 logger.error('Unable to update from git: ' + line)
                 return
 
+        _, _ = runGit('clean -fd')
         clean_pyc()
 
     elif plexpy.INSTALL_TYPE == 'source':
@@ -341,8 +339,15 @@ def update():
         # Extract the tar to update folder
         logger.info('Extracting file: ' + tar_download_path)
         tar = tarfile.open(tar_download_path)
-        tar.extractall(update_dir)
-        tar.close()
+        try:
+            safe_extract(tar, update_dir)
+        except ValueError as e:
+            logger.error('Invalid update archive: %s', e)
+            tar.close()
+            os.remove(tar_download_path)
+            return
+        else:
+            tar.close()
 
         # Delete the tar.gz
         logger.info('Deleting file: ' + tar_download_path)
@@ -554,3 +559,14 @@ def clean_pyc():
                     os.remove(filepath)
                 except OSError as e:
                     logger.error('Failed to remove file %s: %s', filepath, e)
+
+
+def safe_extract(tar, path):
+    base_path = os.path.realpath(path)
+
+    for member in tar.getmembers():
+        member_path = os.path.realpath(os.path.join(base_path, member.name))
+        if not helpers.is_subdir(member_path, base_path):
+            raise ValueError(f"Path traversal detected: {member.name}")
+
+    tar.extractall(path)

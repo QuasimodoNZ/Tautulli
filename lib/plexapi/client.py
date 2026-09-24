@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 import time
 import weakref
 from xml.etree import ElementTree
@@ -115,7 +114,7 @@ class PlexClient(PlexObject):
                 )
         else:
             client = data[0]
-        self._loadData(client)
+        self._invalidateCacheAndLoadData(client)
         return self
 
     def reload(self):
@@ -124,7 +123,6 @@ class PlexClient(PlexObject):
 
     def _loadData(self, data):
         """ Load attribute values from Plex XML response. """
-        self._data = data
         self.deviceClass = data.attrib.get('deviceClass')
         self.machineIdentifier = data.attrib.get('machineIdentifier')
         self.product = data.attrib.get('product')
@@ -197,8 +195,7 @@ class PlexClient(PlexObject):
                 raise NotFound(message)
             else:
                 raise BadRequest(message)
-        data = utils.cleanXMLString(response.text).encode('utf8')
-        return ElementTree.fromstring(data) if data.strip() else None
+        return utils.parseXMLString(response.text)
 
     def sendCommand(self, command, proxy=None, **params):
         """ Convenience wrapper around :func:`~plexapi.client.PlexClient.query` to more easily
@@ -222,7 +219,7 @@ class PlexClient(PlexObject):
         proxy = self._proxyThroughServer if proxy is None else proxy
         query = self._server.query if proxy else self.query
 
-        # Workaround for ptp. See https://github.com/pkkid/python-plexapi/issues/244
+        # Workaround for ptp. See https://github.com/pushingkarmaorg/python-plexapi/issues/244
         t = time.time()
         if command == 'timeline/poll':
             self._last_call = t
@@ -484,8 +481,38 @@ class PlexClient(PlexObject):
         """
         self.setStreams(videoStreamID=videoStreamID, mtype=mtype)
 
+    def createPlayQueue(self, server, items, offset=0, paused=False, **params):
+        """ Create a playqueue and start playback of the specified media item.
+
+            Parameters:
+                server (:class:`~plexapi.server.PlexServer`): Server you are connected to.
+                items (:class:`~plexapi.base.PlexPartialObject`):
+                    A media item or a list of media items.
+                offset (int, optional): Number of milliseconds at which to start playing with zero
+                    representing the beginning (default 0).
+                paused (bool, optional): Set True to pause playback,
+                    default False to start playback immediately.
+                **params (dict): Additional options to apply to the playqueue.
+                    See :func:`~plexapi.playqueue.PlayQueue.create` for available parameters.
+        """
+        protocol, address, port = server._baseurl.split(':')
+        args = PlayQueue._createArgs(
+            server=server,
+            items=items,
+            offset=offset,
+            paused=int(bool(paused)),
+            protocol=protocol,
+            address=address.strip('/'),
+            port=port,
+            machineIdentifier=server.machineIdentifier,
+            source=server.machineIdentifier,
+            **params)
+        self.sendCommand("playback/createPlayQueue", **args)
+
     def playMedia(self, media, offset=0, **params):
-        """ Start playback of the specified media item. See also:
+        """ Start playback of the specified media item.
+            Note: This is a legacy command for older clients.
+            Use :func:`~plexapi.client.PlexClient.createPlayQueue` instead for modern clients.
 
             Parameters:
                 media (:class:`~plexapi.media.Media`): Media item to be played back
@@ -606,7 +633,7 @@ class ClientTimeline(PlexObject):
     key = 'timeline/poll'
 
     def _loadData(self, data):
-        self._data = data
+        """ Load attribute values from Plex XML response. """
         self.address = data.attrib.get('address')
         self.audioStreamId = utils.cast(int, data.attrib.get('audioStreamId'))
         self.autoPlay = utils.cast(bool, data.attrib.get('autoPlay'))

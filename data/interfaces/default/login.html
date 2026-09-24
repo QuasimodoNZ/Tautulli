@@ -12,6 +12,7 @@
     <meta name="description" content="">
     <meta name="author" content="">
     <meta name="referrer" content="no-referrer">
+    <meta name="csrf-token" content="${_csrf_token}">
     <link href="${http_root}css/bootstrap3/bootstrap.min.css" rel="stylesheet">
     <link href="${http_root}css/tautulli.css${cache_param}" rel="stylesheet">
     <link href="${http_root}css/opensans.min.css" rel="stylesheet">
@@ -116,15 +117,21 @@
 <script>
     var login_accordion = new Accordion($('#login-methods'), false, false);
 
+    function OAuthPreFunction() {
+        $('#sign-in-alert').hide();
+    }
     function OAuthSuccessCallback(authToken) {
         signIn(true, authToken);
     }
     function OAuthErrorCallback() {
         $('#sign-in-alert').text('Error communicating with Plex.tv.').show();
     }
+    function OAuthMaxRetryCallback() {
+        $('#sign-in-alert').text('Authentication timed out. Please try again.').show();
+    }
 
     $('#sign-in-plex').click(function() {
-        PlexOAuth(OAuthSuccessCallback, OAuthErrorCallback);
+        PlexOAuth(OAuthSuccessCallback, OAuthErrorCallback, OAuthMaxRetryCallback, null, OAuthPreFunction);
     });
 
     $('#login-form').submit(function(event) {
@@ -170,6 +177,9 @@
                         $('#sign-in-alert').text('Incorrect username or password.').show();
                         $('#username').focus();
                     }
+                },
+                403: function(xhr, status) {
+                    $('#sign-in-alert').text('Invalid CSRF token. Refresh the page and try again.').show();
                 },
                 429: function(xhr, status) {
                     var retry = Math.ceil(xhr.getResponseHeader('Retry-After') / 60)

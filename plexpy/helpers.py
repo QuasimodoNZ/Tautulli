@@ -24,8 +24,8 @@ from cloudinary.utils import cloudinary_url
 from collections import OrderedDict
 from datetime import date, datetime, timezone
 from functools import reduce, wraps
-from itertools import groupby
-from future.moves.itertools import islice, zip_longest
+import hashlib
+from itertools import groupby, islice, zip_longest
 from ipaddress import ip_address, ip_network, IPv4Address
 import ipwhois
 import ipwhois.exceptions
@@ -35,6 +35,7 @@ import json
 import math
 import operator
 import os
+from pathlib import Path, PureWindowsPath
 import re
 import shlex
 import socket
@@ -225,7 +226,7 @@ def now(sep=False):
 
 
 def YMD_to_timestamp(ymd):
-    return datetime.strptime(ymd, "%Y-%m-%d").timestamp()
+    return datetime.strptime(ymd, "%Y-%m-%d").astimezone().timestamp()
 
 
 def timestamp_to_YMDHMS(ts, sep=False, ymd=False):
@@ -699,6 +700,20 @@ def sanitize(obj):
     else:
         return obj
 
+def json_dumps_for_html(obj, **kwargs):
+    """ Serialize obj to JSON that is safe to embed inside an HTML <script> block.
+
+    json.dumps does not escape '<', '>' or '&', so a value containing '</script>'
+    would otherwise break out of the script element and allow HTML/JS injection.
+    These characters are replaced with their equivalent \\uXXXX escapes, which are
+    parsed back to the original characters by the JS engine but are inert to the
+    HTML parser. The line/paragraph separators are already escaped by json.dumps
+    (ensure_ascii defaults to True).
+    """
+    return (json.dumps(obj, **kwargs)
+            .replace('<', '\\u003c')
+            .replace('>', '\\u003e')
+            .replace('&', '\\u0026'))
 
 def is_public_ip(host):
     ip = is_valid_ip(get_ip(host))
@@ -784,7 +799,7 @@ def get_img_service(include_self=False):
     elif plexpy.CONFIG.NOTIFY_UPLOAD_POSTERS == 3:
         return 'cloudinary'
     else:
-        return None
+        return ''
 
 
 def upload_to_imgur(img_data, img_title='', rating_key='', fallback=''):
@@ -796,7 +811,7 @@ def upload_to_imgur(img_data, img_title='', rating_key='', fallback=''):
         return img_url, delete_hash
 
     headers = {'Authorization': 'Client-ID %s' % plexpy.CONFIG.IMGUR_CLIENT_ID}
-    data = {'image': base64.b64encode(img_data),
+    data = {'image': base64str(img_data),
             'title': img_title.encode('utf-8'),
             'name': str(rating_key) + '.png',
             'type': 'png'}
@@ -1483,9 +1498,9 @@ def move_to_front(l, value):
     return l
 
 
-def is_hdr(bit_depth, color_space):
+def is_hdr(bit_depth, color_trc):
     bit_depth = cast_to_int(bit_depth)
-    return bit_depth > 8 and color_space == 'bt2020nc'
+    return bit_depth > 8 and (color_trc == 'smpte2084' or color_trc == 'arib-std-b67')
 
 
 def version_to_tuple(version):
@@ -1590,7 +1605,7 @@ def browse_path(path=None, include_hidden=False, filter_ext=''):
         drives = ['%s:\\' % d for d in string.ascii_uppercase if os.path.exists('%s:' % d)]
         for drive in drives:
             out = {
-                'key': base64.b64encode(drive.encode('UTF-8')),
+                'key': base64str(drive),
                 'path': drive,
                 'title': drive,
                 'type': 'folder',
@@ -1607,7 +1622,7 @@ def browse_path(path=None, include_hidden=False, filter_ext=''):
     if path != os.path.dirname(path):
         parent_path = os.path.dirname(path)
         out = {
-            'key': base64.b64encode(parent_path.encode('UTF-8')),
+            'key': base64str(parent_path),
             'path': parent_path,
             'title': '..',
             'type': 'folder',
@@ -1617,7 +1632,7 @@ def browse_path(path=None, include_hidden=False, filter_ext=''):
     elif os.name == 'nt':
         parent_path = 'My Computer'
         out = {
-            'key': base64.b64encode(parent_path.encode('UTF-8')),
+            'key': base64str(parent_path),
             'path': parent_path,
             'title': parent_path,
             'type': 'folder',
@@ -1631,7 +1646,7 @@ def browse_path(path=None, include_hidden=False, filter_ext=''):
                 continue
             dir_path = os.path.join(root, d)
             out = {
-                'key': base64.b64encode(dir_path.encode('UTF-8')),
+                'key': base64str(dir_path),
                 'path': dir_path,
                 'title': d,
                 'type': 'folder',
@@ -1649,7 +1664,7 @@ def browse_path(path=None, include_hidden=False, filter_ext=''):
                 continue
             file_path = os.path.join(root, f)
             out = {
-                'key': base64.b64encode(file_path.encode('UTF-8')),
+                'key': base64str(file_path),
                 'path': file_path,
                 'title': f,
                 'type': 'file',
@@ -1735,3 +1750,53 @@ def get_ipv6_network_address(ip: str) -> str:
     if cidr_pattern.match(plexpy.CONFIG.NOTIFY_CONCURRENT_IPV6_CIDR):
         cidr = plexpy.CONFIG.NOTIFY_CONCURRENT_IPV6_CIDR
     return str(ip_network(ip+cidr, strict=False).network_address)
+
+
+def is_subdir(child: str, parent: str) -> bool:
+    child = Path(child).resolve()
+    parent = Path(parent).resolve()
+    return child.is_relative_to(parent)
+
+
+def is_mount(path: str) -> bool:
+    if not path:
+        return False
+
+    # Ignore paths within Tautulli's data directory (e.g. Docker /config folder)
+    if is_subdir(path, plexpy.DATA_DIR):
+        return False
+
+    try:
+        path = Path(path).resolve()
+    except OSError:
+        path = Path(path)
+
+    def is_filesystem_root(p: Path) -> bool:
+        # Windows: Drive letter roots (e.g., C:\, D:\) but not UNC paths (e.g., \\server\share)
+        if isinstance(p, PureWindowsPath) and len(p.drive) == 2 and p.parent == p:
+            return True
+        # Unix/Linux: Filesystem root (/)
+        if p == Path('/'):
+            return True
+        return False
+
+    try:
+        # Check if path or any parent is a mount (but not a filesystem root)
+        return any(p.is_mount() and not is_filesystem_root(p) for p in [path, *path.parents])
+    except (OSError, FileNotFoundError):
+        # If we can't check mount status (e.g., path doesn't exist, access denied)
+        return False
+
+
+def allow_mount(path: str) -> bool:
+    return plexpy.CONFIG.ALLOW_MOUNTED_FOLDERS or not is_mount(path)
+
+
+def base64str(text):
+    if isinstance(text, str):
+        text = text.encode('utf-8')
+    return base64.b64encode(text).decode('utf-8')
+
+
+def hash_pms_uuid():
+    return hashlib.sha256(plexpy.CONFIG.PMS_UUID.encode()).hexdigest()[:10]

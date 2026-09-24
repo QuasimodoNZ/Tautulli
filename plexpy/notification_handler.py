@@ -26,7 +26,8 @@ import os
 import re
 from string import Formatter
 import threading
-from typing import Optional
+import types
+from typing import Any, Callable, Optional
 
 import arrow
 import musicbrainzngs
@@ -145,21 +146,6 @@ def notify_conditions(notify_action=None, stream_data=None, timeline_data=None, 
 
     # Activity notifications
     if stream_data:
-        # Check if notifications enabled for user and library
-        # user_data = users.Users()
-        # user_details = user_data.get_details(user_id=stream_data['user_id'])
-        #
-        # library_data = libraries.Libraries()
-        # library_details = library_data.get_details(section_id=stream_data['section_id'])
-
-        # if not user_details['do_notify']:
-        #     logger.debug("Tautulli NotificationHandler :: Notifications for user '%s' are disabled." % user_details['username'])
-        #     return False
-        #
-        # elif not library_details['do_notify'] and notify_action not in ('on_concurrent', 'on_newdevice'):
-        #     logger.debug("Tautulli NotificationHandler :: Notifications for library '%s' are disabled." % library_details['section_name'])
-        #     return False
-
         if notify_action == 'on_concurrent':
             pms_connect = pmsconnect.PmsConnect()
             result = pms_connect.get_current_activity()
@@ -209,14 +195,6 @@ def notify_conditions(notify_action=None, stream_data=None, timeline_data=None, 
     # Recently Added notifications
     elif timeline_data:
 
-        # Check if notifications enabled for library
-        # library_data = libraries.Libraries()
-        # library_details = library_data.get_details(section_id=timeline_data['section_id'])
-        #
-        # if not library_details['do_notify_created']:
-        #     # logger.debug("Tautulli NotificationHandler :: Notifications for library '%s' is disabled." % library_details['section_name'])
-        #     return False
-
         evaluated = True
 
     elif notify_action == 'on_pmsupdate':
@@ -230,6 +208,10 @@ def notify_conditions(notify_action=None, stream_data=None, timeline_data=None, 
         if not plexpy.CONFIG.NOTIFY_PLEXPY_UPDATE_REPEAT:
             evaluated = not check_nofity_tag(notify_action=notify_action,
                                              tag=kwargs['plexpy_download_info']['tag_name'])
+
+    elif notify_action == 'on_tokenexpired':
+        evaluated = not check_nofity_tag(notify_action=notify_action,
+                                         tag=hashlib.sha256(plexpy.CONFIG.PMS_TOKEN.encode('utf-8')).hexdigest()[:10])
 
     # Server notifications
     else:
@@ -499,6 +481,8 @@ def set_notify_state(notifier, notify_action, subject='', body='', script_args='
             values['tag'] = parameters['update_version']
         elif notify_action == 'on_plexpyupdate':
             values['tag'] = parameters['tautulli_update_version']
+        elif notify_action == 'on_tokenexpired':
+            values['tag'] = hashlib.sha256(plexpy.CONFIG.PMS_TOKEN.encode('utf-8')).hexdigest()[:10]
 
         monitor_db.upsert(table_name='notify_log', key_dict=keys, value_dict=values)
         return monitor_db.last_insert_id()
@@ -677,46 +661,52 @@ def build_media_notify_params(notify_action=None, session=None, timeline=None, m
 
     if 'imdb://' in notify_params['guid'] or notify_params['imdb_id']:
         notify_params['imdb_id'] = notify_params['imdb_id'] or notify_params['guid'].split('imdb://')[1].split('?')[0]
-        notify_params['imdb_url'] = 'https://www.imdb.com/title/' + notify_params['imdb_id']
-        notify_params['trakt_url'] = 'https://trakt.tv/search/imdb/' + notify_params['imdb_id']
+        notify_params['imdb_url'] = f'https://www.imdb.com/title/{notify_params["imdb_id"]}'
+        notify_params['trakt_url'] = f'https://trakt.tv/search/imdb/{notify_params["imdb_id"]}'
+        notify_params['simkl_url'] = f'https://api.simkl.com/redirect?to=Simkl&imdb={notify_params["imdb_id"]}'
 
     if 'thetvdb://' in notify_params['guid'] or notify_params['thetvdb_id']:
         thetvdb_media_type = 'movie' if notify_params['media_type'] == 'movie' else 'series'
         notify_params['thetvdb_id'] = notify_params['thetvdb_id'] or notify_params['guid'].split('thetvdb://')[1].split('/')[0].split('?')[0]
         notify_params['thetvdb_url'] = f'https://thetvdb.com/dereferrer/{thetvdb_media_type}/{notify_params["thetvdb_id"]}'
-        notify_params['trakt_url'] = 'https://trakt.tv/search/tvdb/' + notify_params['thetvdb_id'] + '?id_type=show'
+        notify_params['trakt_url'] = f'https://trakt.tv/search/tvdb/{notify_params["thetvdb_id"]}?id_type=show'
+        notify_params['simkl_url'] = f'https://api.simkl.com/redirect?to=Simkl&tvdb={notify_params["thetvdb_id"]}'
 
     elif 'thetvdbdvdorder://' in notify_params['guid']:
         notify_params['thetvdb_id'] = notify_params['guid'].split('thetvdbdvdorder://')[1].split('/')[0].split('?')[0]
         notify_params['thetvdb_url'] = f'https://thetvdb.com/dereferrer/series/{notify_params["thetvdb_id"]}'
-        notify_params['trakt_url'] = 'https://trakt.tv/search/tvdb/' + notify_params['thetvdb_id'] + '?id_type=show'
+        notify_params['trakt_url'] = f'https://trakt.tv/search/tvdb/{notify_params["thetvdb_id"]}?id_type=show'
+        notify_params['simkl_url'] = f'https://api.simkl.com/redirect?to=Simkl&tvdb={notify_params["thetvdb_id"]}'
 
     if 'themoviedb://' in notify_params['guid'] or notify_params['themoviedb_id']:
         if notify_params['media_type'] == 'movie':
             notify_params['themoviedb_id'] = notify_params['themoviedb_id'] or notify_params['guid'].split('themoviedb://')[1].split('?')[0]
-            notify_params['themoviedb_url'] = 'https://www.themoviedb.org/movie/' + notify_params['themoviedb_id']
-            notify_params['trakt_url'] = 'https://trakt.tv/search/tmdb/' + notify_params['themoviedb_id'] + '?id_type=movie'
+            notify_params['themoviedb_url'] = f'https://www.themoviedb.org/movie/{notify_params["themoviedb_id"]}'
+            notify_params['trakt_url'] = f'https://trakt.tv/search/tmdb/{notify_params["themoviedb_id"]}?id_type=movie'
+            notify_params['simkl_url'] = f'https://api.simkl.com/redirect?to=Simkl&tmdb={notify_params["themoviedb_id"]}'
 
         elif notify_params['media_type'] in ('show', 'season', 'episode'):
             notify_params['themoviedb_id'] = notify_params['themoviedb_id'] or notify_params['guid'].split('themoviedb://')[1].split('/')[0].split('?')[0]
-            notify_params['themoviedb_url'] = 'https://www.themoviedb.org/tv/' + notify_params['themoviedb_id']
-            notify_params['trakt_url'] = 'https://trakt.tv/search/tmdb/' + notify_params['themoviedb_id'] + '?id_type=show'
+            notify_params['themoviedb_url'] = f'https://www.themoviedb.org/tv/{notify_params["themoviedb_id"]}'
+            notify_params['trakt_url'] = f'https://trakt.tv/search/tmdb/{notify_params["themoviedb_id"]}?id_type=show'
+            notify_params['simkl_url'] = f'https://api.simkl.com/redirect?to=Simkl&tmdb={notify_params["themoviedb_id"]}&type=show'
 
     if 'lastfm://' in notify_params['guid']:
         notify_params['lastfm_id'] = '/'.join(notify_params['guid'].split('lastfm://')[1].split('?')[0].split('/')[:2])
-        notify_params['lastfm_url'] = 'https://www.last.fm/music/' + notify_params['lastfm_id']
+        notify_params['lastfm_url'] = f'https://www.last.fm/music/{notify_params["lastfm_id"]}'
 
     if 'mbid://' in notify_params['guid'] or notify_params['musicbrainz_id']:
         if notify_params['media_type'] == 'artist':
-            notify_params['musicbrainz_url'] = 'https://musicbrainz.org/artist/' + notify_params['musicbrainz_id']
+            notify_params['musicbrainz_url'] = f'https://musicbrainz.org/artist/{notify_params["musicbrainz_id"]}'
         elif notify_params['media_type'] == 'album':
-            notify_params['musicbrainz_url'] = 'https://musicbrainz.org/release/' + notify_params['musicbrainz_id']
+            notify_params['musicbrainz_url'] = f'https://musicbrainz.org/release/{notify_params["musicbrainz_id"]}'
         else:
-            notify_params['musicbrainz_url'] = 'https://musicbrainz.org/track/' + notify_params['musicbrainz_id']
+            notify_params['musicbrainz_url'] = f'https://musicbrainz.org/track/{notify_params["musicbrainz_id"]}'
 
     if 'hama://' in notify_params['guid']:
         notify_params['anidb_id'] = notify_params['guid'].split('hama://')[1].split('/')[0].split('?')[0].split('-')[1]
-        notify_params['anidb_url'] = 'https://anidb.net/anime/' + notify_params['anidb_id']
+        notify_params['anidb_url'] = f'https://anidb.net/anime/{notify_params["anidb_id"]}'
+        notify_params['simkl_url'] = f'https://api.simkl.com/redirect?to=Simkl&anidb={notify_params["anidb_id"]}'
 
     # Get TheMovieDB info (for movies and tv only)
     if plexpy.CONFIG.THEMOVIEDB_LOOKUP and notify_params['media_type'] in ('movie', 'show', 'season', 'episode'):
@@ -763,10 +753,10 @@ def build_media_notify_params(notify_action=None, session=None, timeline=None, m
             notify_params.update(themoviedb_info)
 
             if themoviedb_info.get('imdb_id'):
-                notify_params['imdb_url'] = 'https://www.imdb.com/title/' + themoviedb_info['imdb_id']
+                notify_params['imdb_url'] = f'https://www.imdb.com/title/{themoviedb_info["imdb_id"]}'
             if themoviedb_info.get('themoviedb_id'):
-                notify_params['trakt_url'] = 'https://trakt.tv/search/tmdb/{}?id_type={}'.format(
-                    notify_params['themoviedb_id'], 'show' if lookup_media_type == 'tv' else 'movie')
+                notify_params['trakt_url'] = f'https://trakt.tv/search/tmdb/{notify_params["themoviedb_id"]}?id_type={"show" if lookup_media_type == "tv" else "movie"}'
+                notify_params['simkl_url'] = f'https://api.simkl.com/redirect?to=Simkl&tmdb={notify_params["themoviedb_id"]}&type={"show" if lookup_media_type == "tv" else "movie"}'
 
     # Get TVmaze info (for tv shows only)
     if plexpy.CONFIG.TVMAZE_LOOKUP and notify_params['media_type'] in ('show', 'season', 'episode'):
@@ -790,10 +780,12 @@ def build_media_notify_params(notify_action=None, session=None, timeline=None, m
 
             if tvmaze_info.get('thetvdb_id'):
                 notify_params['thetvdb_url'] = f'https://thetvdb.com/dereferrer/series/{tvmaze_info["thetvdb_id"]}'
-                notify_params['trakt_url'] = 'https://trakt.tv/search/tvdb/{}' + str(notify_params['thetvdb_id']) + '?id_type=show'
+                notify_params['trakt_url'] = f'https://trakt.tv/search/tvdb/{notify_params["thetvdb_id"]}?id_type=show'
+                notify_params['simkl_url'] = f'https://api.simkl.com/redirect?to=Simkl&tvdb={notify_params["thetvdb_id"]}'
             if tvmaze_info.get('imdb_id'):
-                notify_params['imdb_url'] = 'https://www.imdb.com/title/' + tvmaze_info['imdb_id']
-                notify_params['trakt_url'] = 'https://trakt.tv/search/imdb/' + notify_params['imdb_id']
+                notify_params['imdb_url'] = f'https://www.imdb.com/title/{tvmaze_info["imdb_id"]}'
+                notify_params['trakt_url'] = f'https://trakt.tv/search/imdb/{notify_params["imdb_id"]}'
+                notify_params['simkl_url'] = f'https://api.simkl.com/redirect?to=Simkl&imdb={notify_params["imdb_id"]}'
 
     # Get MusicBrainz info (for music only)
     if plexpy.CONFIG.MUSICBRAINZ_LOOKUP and notify_params['media_type'] in ('artist', 'album', 'track'):
@@ -840,6 +832,7 @@ def build_media_notify_params(notify_action=None, session=None, timeline=None, m
     elif notify_params['media_type'] == 'clip':
         if notify_params['extra_type']:
             poster_thumb = notify_params['art'].replace('/art', '/thumb') or notify_params['thumb']
+            notify_params['extra_text'] = common.EXTRA_TYPES.get(notify_params['extra_type'], '').lower()
         else:
             poster_thumb = notify_params['parent_thumb'] or notify_params['thumb']
         poster_key = notify_params['rating_key']
@@ -860,7 +853,7 @@ def build_media_notify_params(notify_action=None, session=None, timeline=None, m
 
     img_service = helpers.get_img_service(include_self=True)
     fallback = 'poster-live' if notify_params['live'] else 'poster'
-    if img_service not in (None, 'self-hosted'):
+    if img_service not in ('', 'self-hosted'):
         img_info = get_img_info(img=poster_thumb, rating_key=poster_key, title=poster_title, fallback=fallback)
         poster_info = {'poster_title': img_info['img_title'], 'poster_url': img_info['img_url']}
         notify_params.update(poster_info)
@@ -1066,7 +1059,8 @@ def build_media_notify_params(notify_action=None, session=None, timeline=None, m
         'stream_video_dovi_level': notify_params['stream_video_dovi_level'],
         'stream_video_dovi_profile': notify_params['stream_video_dovi_profile'],
         'stream_video_framerate': notify_params['stream_video_framerate'],
-        'stream_video_full_resolution': notify_params['stream_video_full_resolution'],
+        'stream_video_full_resolution': common.VIDEO_RESOLUTION_OVERRIDES.get(
+            notify_params['stream_video_full_resolution'], notify_params['stream_video_full_resolution']),
         'stream_video_ref_frames': notify_params['stream_video_ref_frames'],
         'stream_video_resolution': notify_params['stream_video_resolution'],
         'stream_video_scan_type': notify_params['stream_video_scan_type'],
@@ -1083,6 +1077,7 @@ def build_media_notify_params(notify_action=None, session=None, timeline=None, m
         'stream_audio_language': notify_params['stream_audio_language'],
         'stream_audio_language_code': notify_params['stream_audio_language_code'],
         'stream_audio_profile': notify_params['stream_audio_profile'],
+        'stream_audio_atmos': notify_params['stream_audio_atmos'],
         'stream_subtitle_codec': notify_params['stream_subtitle_codec'],
         'stream_subtitle_container': notify_params['stream_subtitle_container'],
         'stream_subtitle_format': notify_params['stream_subtitle_format'],
@@ -1111,6 +1106,8 @@ def build_media_notify_params(notify_action=None, session=None, timeline=None, m
         'machine_id': notify_params['machine_id'],
         # Source metadata parameters
         'media_type': notify_params['media_type'],
+        'extra_type': notify_params['extra_text'],
+        'preroll': int('prerolls://' in notify_params['guid']),
         'library_name': notify_params['library_name'],
         'title': notify_params['full_title'],
         'edition_title': notify_params['edition_title'],
@@ -1183,6 +1180,7 @@ def build_media_notify_params(notify_action=None, session=None, timeline=None, m
         'anidb_url': notify_params['anidb_url'],
         'lastfm_url': notify_params['lastfm_url'],
         'trakt_url': notify_params['trakt_url'],
+        'simkl_url': notify_params['simkl_url'],
         'container': notify_params['container'],
         'bitrate': notify_params['bitrate'],
         'aspect_ratio': notify_params['aspect_ratio'],
@@ -1200,7 +1198,8 @@ def build_media_notify_params(notify_action=None, session=None, timeline=None, m
         'video_dovi_level': notify_params['video_dovi_level'],
         'video_dovi_profile': notify_params['video_dovi_profile'],
         'video_framerate': notify_params['video_framerate'],
-        'video_full_resolution': notify_params['video_full_resolution'],
+        'video_full_resolution': common.VIDEO_RESOLUTION_OVERRIDES.get(
+            notify_params['video_full_resolution'], notify_params['video_full_resolution']),
         'video_ref_frames': notify_params['video_ref_frames'],
         'video_resolution': notify_params['video_resolution'],
         'video_scan_type': notify_params['video_scan_type'],
@@ -1217,6 +1216,7 @@ def build_media_notify_params(notify_action=None, session=None, timeline=None, m
         'audio_language': notify_params['audio_language'],
         'audio_language_code': notify_params['audio_language_code'],
         'audio_profile': notify_params['audio_profile'],
+        'audio_atmos': notify_params['audio_atmos'],
         'subtitle_codec': notify_params['subtitle_codec'],
         'subtitle_container': notify_params['subtitle_container'],
         'subtitle_format': notify_params['subtitle_format'],
@@ -1331,6 +1331,27 @@ def build_server_notify_params(notify_action=None, **kwargs):
     return available_params
 
 
+ALL_TAGS = (
+    r'<movie>.*?</movie>|'
+    r'<show>.*?</show>|'
+    r'<season>.*?</season>|'
+    r'<episode>.*?</episode>|'
+    r'<artist>.*?</artist>|'
+    r'<album>.*?</album>|'
+    r'<track>.*?</track>'
+)
+MEDIA_TAGS_REGEX = {
+    'movie': re.compile(ALL_TAGS.replace('<movie>.*?</movie>', '<movie>|</movie>'), re.IGNORECASE | re.DOTALL),
+    'show': re.compile(ALL_TAGS.replace('<show>.*?</show>', '<show>|</show>'), re.IGNORECASE | re.DOTALL),
+    'season': re.compile(ALL_TAGS.replace('<season>.*?</season>', '<season>|</season>'), re.IGNORECASE | re.DOTALL),
+    'episode': re.compile(ALL_TAGS.replace('<episode>.*?</episode>', '<episode>|</episode>'), re.IGNORECASE | re.DOTALL),
+    'artist': re.compile(ALL_TAGS.replace('<artist>.*?</artist>', '<artist>|</artist>'), re.IGNORECASE | re.DOTALL),
+    'album': re.compile(ALL_TAGS.replace('<album>.*?</album>', '<album>|</album>'), re.IGNORECASE | re.DOTALL),
+    'track': re.compile(ALL_TAGS.replace('<track>.*?</track>', '<track>|</track>'), re.IGNORECASE | re.DOTALL),
+    'default': re.compile(ALL_TAGS, re.IGNORECASE | re.DOTALL),
+}
+
+
 def build_notify_text(subject='', body='', notify_action=None, parameters=None, agent_id=None, test=False, as_json=False):
     # Default subject and body text
     if agent_id == 15:
@@ -1349,28 +1370,7 @@ def build_notify_text(subject='', body='', notify_action=None, parameters=None, 
         body = default_body
 
     media_type = parameters.get('media_type')
-
-    all_tags = r'<movie>.*?</movie>|' \
-        '<show>.*?</show>|<season>.*?</season>|<episode>.*?</episode>|' \
-        '<artist>.*?</artist>|<album>.*?</album>|<track>.*?</track>'
-
-    # Check for exclusion tags
-    if media_type == 'movie':
-        pattern = re.compile(all_tags.replace('<movie>.*?</movie>', '<movie>|</movie>'), re.IGNORECASE | re.DOTALL)
-    elif media_type == 'show':
-        pattern = re.compile(all_tags.replace('<show>.*?</show>', '<show>|</show>'), re.IGNORECASE | re.DOTALL)
-    elif media_type == 'season':
-        pattern = re.compile(all_tags.replace('<season>.*?</season>', '<season>|</season>'), re.IGNORECASE | re.DOTALL)
-    elif media_type == 'episode':
-        pattern = re.compile(all_tags.replace('<episode>.*?</episode>', '<episode>|</episode>'), re.IGNORECASE | re.DOTALL)
-    elif media_type == 'artist':
-        pattern = re.compile(all_tags.replace('<artist>.*?</artist>', '<artist>|</artist>'), re.IGNORECASE | re.DOTALL)
-    elif media_type == 'album':
-        pattern = re.compile(all_tags.replace('<album>.*?</album>', '<album>|</album>'), re.IGNORECASE | re.DOTALL)
-    elif media_type == 'track':
-        pattern = re.compile(all_tags.replace('<track>.*?</track>', '<track>|</track>'), re.IGNORECASE | re.DOTALL)
-    else:
-        pattern = re.compile(all_tags, re.IGNORECASE | re.DOTALL)
+    pattern = MEDIA_TAGS_REGEX.get(media_type, MEDIA_TAGS_REGEX['default'])
 
     # Remove the unwanted tags and strip any unmatch tags too.
     subject = strip_tag(re.sub(pattern, '', subject), agent_id).strip(' \t\n\r')
@@ -1531,7 +1531,7 @@ def get_img_info(img=None, rating_key=None, title='', width=1000, height=1500,
 
     service = helpers.get_img_service()
 
-    if service is None:
+    if service == '':
         return img_info
 
     elif service == 'cloudinary':
@@ -1919,7 +1919,7 @@ def str_format(s, parameters):
     return s
 
 
-def str_eval(field_name, kwargs):
+def str_eval(field_name: str, kwargs: dict[str, Callable]) -> Any:
     field_name = field_name.strip('`')
     allowed_names = {
         'bool': bool,
@@ -1932,21 +1932,30 @@ def str_eval(field_name, kwargs):
     }
     allowed_names.update(kwargs)
     code = compile(field_name, '<string>', 'eval')
-    for name in code.co_names:
-        if name not in allowed_names:
-            raise NameError('Use of {name} not allowed'.format(name=name))
+    _check_names(code, allowed_names)
     return eval(code, {'__builtins__': {}}, allowed_names)
 
 
+def _check_names(code: types.CodeType, allowed_names: dict[str, Callable]):
+    for name in code.co_names:
+        if name not in allowed_names:
+            raise NameError(f'Use of {name} not allowed')
+    for const in code.co_consts:
+        if isinstance(const, types.CodeType):
+            _check_names(const, allowed_names)
+
+
 class CustomFormatter(Formatter):
+    EVAL_REGEX = re.compile(r'`.*?`')
+    EVAL_REPLACE_REGEX = re.compile(r'{[^{}]*?(`.*?`)[^{}]*?}')
+    EVAL_REPLACE = {
+        ':': '%%colon%%',
+        '!': '%%exclamation%%'
+    }
+    SLICE_REGEX = re.compile(r'\[(?P<start>-?\d*)(?P<slice>:?)(?P<end>-?\d*)\]')
+
     def __init__(self, default='{{{0}}}'):
         self.default = default
-        self.eval_regex = re.compile(r'`.*?`')
-        self.eval_replace_regex = re.compile(r'{.*(`.*?`).*}')
-        self.eval_replace = {
-            ':': '%%colon%%',
-            '!': '%%exclamation%%'
-        }
 
     def convert_field(self, value, conversion):
         if conversion is None:
@@ -1966,8 +1975,7 @@ class CustomFormatter(Formatter):
 
     def format_field(self, value, format_spec):
         if format_spec.startswith('[') and format_spec.endswith(']'):
-            pattern = re.compile(r'\[(?P<start>-?\d*)(?P<slice>:?)(?P<end>-?\d*)\]')
-            match = re.match(pattern, format_spec)
+            match = re.match(self.SLICE_REGEX, format_spec)
             if value and match:
                 groups = match.groupdict()
                 items = [x.strip() for x in str(value).split(',')]
@@ -1995,9 +2003,9 @@ class CustomFormatter(Formatter):
 
     def parse(self, format_string):
         # Replace characters in eval expression
-        for match in re.findall(self.eval_replace_regex, format_string):
+        for match in re.findall(self.EVAL_REPLACE_REGEX, format_string):
             replaced = match
-            for k, v in self.eval_replace.items():
+            for k, v in self.EVAL_REPLACE.items():
                 replaced = replaced.replace(k, v)
             format_string = format_string.replace(match, replaced)
 
@@ -2005,8 +2013,12 @@ class CustomFormatter(Formatter):
 
         for literal_text, field_name, format_spec, conversion in parsed:
             # Restore characters in eval expression
+            if literal_text:
+                for k, v in self.EVAL_REPLACE.items():
+                    literal_text = literal_text.replace(v, k)
+
             if field_name:
-                for k, v in self.eval_replace.items():
+                for k, v in self.EVAL_REPLACE.items():
                     field_name = field_name.replace(v, k)
 
             real_format_string = ''
@@ -2020,8 +2032,8 @@ class CustomFormatter(Formatter):
             prefix = None
             suffix = None
 
-            matches = re.findall(self.eval_regex, real_format_string)
-            temp_format_string = re.sub(self.eval_regex, '{}', real_format_string)
+            matches = re.findall(self.EVAL_REGEX, real_format_string)
+            temp_format_string = re.sub(self.EVAL_REGEX, '{}', real_format_string)
 
             prefix_split = temp_format_string.split('<')
             if len(prefix_split) == 2:
@@ -2033,7 +2045,7 @@ class CustomFormatter(Formatter):
                 suffix = suffix_split[1].replace('\\n', '\n')
                 temp_format_string = suffix_split[0]
 
-            if prefix or suffix:
+            if prefix is not None or suffix is not None:
                 real_format_string = '{' + temp_format_string.format(*matches) + '}'
                 _, field_name, format_spec, conversion, _, _ = next(self.parse(real_format_string))
 

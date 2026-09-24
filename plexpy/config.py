@@ -15,9 +15,9 @@
 
 import os
 import re
-import shutil
 import time
 import threading
+import zipfile
 
 from configobj import ConfigObj, ParseError
 from hashing_passwords import make_hash
@@ -41,11 +41,11 @@ FILENAME = "config.ini"
 
 _CONFIG_DEFINITIONS = {
     'ALLOW_GUEST_ACCESS': (int, 'General', 0),
+    'ALLOW_MOUNTED_FOLDERS': (int, 'Advanced', 0),
     'DATE_FORMAT': (str, 'General', 'YYYY-MM-DD'),
     'PMS_CLIENT_ID': (str, 'PMS', ''),
     'PMS_IDENTIFIER': (str, 'PMS', ''),
     'PMS_IP': (str, 'PMS', '127.0.0.1'),
-    'PMS_IS_CLOUD': (int, 'PMS', 0),
     'PMS_IS_REMOTE': (int, 'PMS', 0),
     'PMS_LANGUAGE': (str, 'PMS', ''),
     'PMS_LOGS_FOLDER': (str, 'PMS', ''),
@@ -131,7 +131,7 @@ _CONFIG_DEFINITIONS = {
     'HTTP_PROXY': (int, 'General', 0),
     'HTTP_ROOT': (str, 'General', ''),
     'HTTP_USERNAME': (str, 'General', ''),
-    'HTTP_PLEX_ADMIN': (int, 'General', 0),
+    'HTTP_PLEX_ADMIN': (int, 'General', 1),
     'HTTP_BASE_URL': (str, 'General', ''),
     'HTTP_RATE_LIMIT_ATTEMPTS': (int, 'General', 10),
     'HTTP_RATE_LIMIT_ATTEMPTS_INTERVAL': (int, 'General', 300),
@@ -182,6 +182,7 @@ _CONFIG_DEFINITIONS = {
     'REFRESH_LIBRARIES_ON_STARTUP': (int, 'Monitoring', 1),
     'REFRESH_USERS_INTERVAL': (int, 'Monitoring', 12),
     'REFRESH_USERS_ON_STARTUP': (int, 'Monitoring', 1),
+    'REMOTE_APP_PUSH_URL': (str, 'Advanced', 'https://relay.tautulliremote.com'),
     'SESSION_DB_WRITE_ATTEMPTS': (int, 'Advanced', 5),
     'SHOW_ADVANCED_SETTINGS': (int, 'General', 0),
     'SYNCHRONOUS_MODE': (str, 'Advanced', 'NORMAL'),
@@ -191,7 +192,6 @@ _CONFIG_DEFINITIONS = {
     'TV_WATCHED_PERCENT': (int, 'Monitoring', 85),
     'UPDATE_DB_INTERVAL': (int, 'General', 24),
     'UPDATE_SHOW_CHANGELOG': (int, 'General', 1),
-    'UPGRADE_FLAG': (int, 'Advanced', 0),
     'VERBOSE_LOGS': (int, 'Advanced', 1),
     'VERIFY_SSL_CERT': (bool_int, 'Advanced', 1),
     'WATCHED_MARKER': (int, 'Monitoring', 3),
@@ -203,6 +203,7 @@ _CONFIG_DEFINITIONS = {
     'JWT_UPDATE_SECRET': (bool_int, 'Advanced', 0),
     'SYSTEM_ANALYTICS': (int, 'Advanced', 1),
     'SYS_TRAY_ICON': (int, 'General', 1),
+    'X_FRAME_OPTIONS': (str, 'Advanced', 'SAMEORIGIN'),
 }
 
 _BLACKLIST_KEYS = ['_APITOKEN', '_TOKEN', '_KEY', '_SECRET', '_PASSWORD', '_APIKEY', '_ID', '_HOOK']
@@ -277,7 +278,6 @@ SETTINGS = [
     'PMS_CLIENT_ID',
     'PMS_IDENTIFIER',
     'PMS_IP',
-    'PMS_IS_CLOUD',
     'PMS_IS_REMOTE',
     'PMS_LOGS_FOLDER',
     'PMS_NAME',
@@ -335,6 +335,7 @@ CHECKED_SETTINGS = [
     'THEMOVIEDB_LOOKUP',
     'TVMAZE_LOOKUP',
     'WEEK_START_MONDAY',
+    'SYSTEM_ANALYTICS',
 ]
 
 
@@ -400,9 +401,9 @@ def make_backup(cleanup=False, scheduler=False):
     """ Makes a backup of config file, removes all but the last 5 backups """
 
     if scheduler:
-        backup_file = 'config.backup-{}.sched.ini'.format(helpers.now())
+        backup_file = 'config.backup-{}.sched.ini.zip'.format(helpers.now())
     else:
-        backup_file = 'config.backup-{}.ini'.format(helpers.now())
+        backup_file = 'config.backup-{}.ini.zip'.format(helpers.now())
     backup_folder = plexpy.CONFIG.BACKUP_DIR
     backup_file_fp = os.path.join(backup_folder, backup_file)
 
@@ -411,13 +412,14 @@ def make_backup(cleanup=False, scheduler=False):
         os.makedirs(backup_folder)
 
     plexpy.CONFIG.write()
-    shutil.copyfile(plexpy.CONFIG_FILE, backup_file_fp)
+    with zipfile.ZipFile(backup_file_fp, 'w', zipfile.ZIP_DEFLATED) as zipf:
+        zipf.write(plexpy.CONFIG_FILE, arcname=FILENAME)
 
     if cleanup:
         now = time.time()
         # Delete all scheduled backup older than BACKUP_DAYS.
         for root, dirs, files in os.walk(backup_folder):
-            ini_files = [os.path.join(root, f) for f in files if f.endswith('.sched.ini')]
+            ini_files = [os.path.join(root, f) for f in files if '.sched.ini' in f]
             for file_ in ini_files:
                 if os.stat(file_).st_mtime < now - plexpy.CONFIG.BACKUP_DAYS * 86400:
                     try:
@@ -479,20 +481,48 @@ class Config(object):
         """ Check if INI section exists, if not create it """
         if section not in self._config:
             self._config[section] = {}
-            return True
-        else:
-            return False
 
-    def check_setting(self, key):
-        """ Cast any value in the config to the right type or use the default """
-        key, definition_type, section, ini_key, default = self._define(key)
+    def check_setting(self, name):
+        """ Check if INI key exists, if not create it """
+        key, definition_type, section, ini_key, default = self._define(name)
         self.check_section(section)
+        value = self._config[section].get(ini_key, default)
+        self._config[section][ini_key] = self._cast_setting(definition_type, value, default)
+    
+    def get_setting(self, name):
+        """ Get the value of a setting, either from the config file or environment variable """
+        key, definition_type, section, ini_key, default = self._define(name)
+        # Check if the key is in the environment variables
+        value = self._from_env(key)
+        if not value:
+            # If not, check if the key is in the config file
+            value = self._config[section].get(ini_key, default)
+        return self._cast_setting(definition_type, value, default)
+    
+    def set_setting(self, name, value):
+        """ Set the value of a setting in the config file """
+        key, definition_type, section, ini_key, default = self._define(name)
+        # Check if the key is in the environment variables
+        env_value = self._from_env(key)
+        if env_value:
+            logger.warn("Tautulli Config :: '%s' set by environment variable. Setting not saved to config.", key)
+            return
+
+        # If not, set the value in the config file
+        self._config[section][ini_key] = self._cast_setting(definition_type, value, default)
+        return self._config[section][ini_key]
+    
+    def _from_env(self, key):
+        """ Get key from environment variables, if it exists """
+        env_key = f"TAUTULLI_{key}"
+        return os.environ.get(env_key)
+    
+    def _cast_setting(self, definition_type, value, default=None):
+        """ Cast the value to the correct type, or use the default if it fails """
         try:
-            my_val = definition_type(self._config[section][ini_key])
+            return definition_type(value)
         except Exception:
-            my_val = definition_type(default)
-            self._config[section][ini_key] = my_val
-        return my_val
+            return definition_type(default)
 
     def write(self):
         """ Make a copy of the stored config and write it to the configured file """
@@ -533,7 +563,7 @@ class Config(object):
         if not re.match(r'[A-Z0-9_]+$', name):
             return super(Config, self).__getattr__(name)
         else:
-            return self.check_setting(name)
+            return self.get_setting(name)
 
     def __setattr__(self, name, value):
         """
@@ -544,9 +574,7 @@ class Config(object):
             super(Config, self).__setattr__(name, value)
             return value
         else:
-            key, definition_type, section, ini_key, default = self._define(name)
-            self._config[section][ini_key] = definition_type(value)
-            return self._config[section][ini_key]
+            return self.set_setting(name, value)
 
     def __delattr__(self, name):
         """
@@ -563,8 +591,7 @@ class Config(object):
         Given a big bunch of key value pairs, apply them to the ini.
         """
         for name, value in kwargs.items():
-            key, definition_type, section, ini_key, default = self._define(name)
-            self._config[section][ini_key] = definition_type(value)
+            self.__setattr__(name.upper(), value)
 
     def _upgrade(self):
         """
@@ -664,12 +691,13 @@ class Config(object):
 
         if self.CONFIG_VERSION == 17:
             home_stats_cards = self.HOME_STATS_CARDS
-            if 'top_users' in home_stats_cards:
-                top_users_index = home_stats_cards.index('top_users')
-                home_stats_cards.insert(top_users_index, 'top_libraries')
-            else:
-                home_stats_cards.append('top_libraries')
-            self.HOME_STATS_CARDS = home_stats_cards
+            if 'top_libraries' not in home_stats_cards:
+                if 'top_users' in home_stats_cards:
+                    top_users_index = home_stats_cards.index('top_users')
+                    home_stats_cards.insert(top_users_index, 'top_libraries')
+                else:
+                    home_stats_cards.append('top_libraries')
+                self.HOME_STATS_CARDS = home_stats_cards
 
             self.CONFIG_VERSION = 18
 

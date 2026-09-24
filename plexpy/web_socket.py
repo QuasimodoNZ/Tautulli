@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 
 # This file is part of Tautulli.
 #
@@ -31,6 +31,7 @@ from plexpy import activity_pinger
 from plexpy import activity_processor
 from plexpy import database
 from plexpy import logger
+from plexpy import plextv
 
 
 name = 'websocket'
@@ -92,6 +93,7 @@ def on_disconnect():
 
 
 def on_intdown():
+    plextv.notify_token_expired()
     plexpy.NOTIFY_QUEUE.put({'notify_action': 'on_intdown'})
 
 
@@ -100,7 +102,7 @@ def on_intup():
 
 
 def reconnect():
-    close()
+    shutdown()
     logger.info("Tautulli WebSocket :: Reconnecting websocket...")
     start_thread()
 
@@ -204,7 +206,7 @@ def run():
             if reconnects == 0:
                 logger.warn("Tautulli WebSocket :: Connection has closed.")
 
-            if not plexpy.CONFIG.PMS_IS_CLOUD and reconnects < plexpy.CONFIG.WEBSOCKET_CONNECTION_ATTEMPTS:
+            if reconnects < plexpy.CONFIG.WEBSOCKET_CONNECTION_ATTEMPTS:
                 reconnects += 1
 
                 # Sleep 5 between connection attempts

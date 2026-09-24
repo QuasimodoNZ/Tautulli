@@ -21,6 +21,7 @@
 # Session tool to be loaded.
 
 from datetime import datetime, timedelta, timezone
+from hmac import compare_digest
 from urllib.parse import quote, unquote
 
 import cherrypy
@@ -30,7 +31,8 @@ import jwt
 import plexpy
 from plexpy import logger
 from plexpy.database import MonitorDatabase
-from plexpy.helpers import timestamp
+from plexpy.helpers import hash_pms_uuid, timestamp
+from plexpy.session import generate_csrf_token
 from plexpy.users import Users, refresh_users
 from plexpy.plextv import PlexTV
 
@@ -134,8 +136,12 @@ def check_credentials(username=None, password=None, token=None, admin_login='0',
     return False, None, None
 
 
+def jwt_cookie_name():
+    return f"{JWT_COOKIE_NAME}{hash_pms_uuid()}"
+
+
 def get_jwt_token():
-    jwt_cookie = str(JWT_COOKIE_NAME + plexpy.CONFIG.PMS_UUID)
+    jwt_cookie = jwt_cookie_name()
     jwt_token = cherrypy.request.cookie.get(jwt_cookie)
 
     if jwt_token:
@@ -265,6 +271,23 @@ def check_rate_limit(ip_address):
         return max(last_timestamp - (timestamp() - plexpy.CONFIG.HTTP_RATE_LIMIT_LOCKOUT_TIME), 0)
 
 
+def check_csrf_token():
+    if cherrypy.request.path_info.startswith('/api'):
+        return
+
+    if (apikey := cherrypy.request.headers.get('X-Api-Key')) and compare_digest(apikey, plexpy.CONFIG.API_KEY):
+        return
+
+    if cherrypy.request.method not in ('POST', 'PUT', 'DELETE'):
+        return
+
+    session_token = cherrypy.session.get('_csrf_token')
+    header_token = cherrypy.request.headers.get('X-CSRF-Token')
+    if not session_token or not header_token or not compare_digest(session_token, header_token):
+        logger.error("Tautulli WebAuth :: CSRF token validation failed for %s", cherrypy.request.path_info)
+        raise cherrypy.HTTPError(403)
+
+
 # Controller to provide login and logout actions
 
 class AuthController(object):
@@ -308,6 +331,11 @@ class AuthController(object):
 
     def get_loginform(self, redirect_uri=''):
         from plexpy.webserve import serve_template
+        # The lock is released once at request end; never double-acquire
+        # (serve_template's CSRF helper also acquires)
+        if not cherrypy.session.locked:
+            cherrypy.session.acquire_lock()
+        cherrypy.session['_csrf_token'] = generate_csrf_token()
         return serve_template(template_name="login.html", title="Login", redirect_uri=unquote(redirect_uri))
 
     @cherrypy.expose
@@ -329,7 +357,7 @@ class AuthController(object):
             self.on_logout(username=payload['user'],
                            user_group=payload['user_group'])
 
-        jwt_cookie = str(JWT_COOKIE_NAME + plexpy.CONFIG.PMS_UUID)
+        jwt_cookie = jwt_cookie_name()
         cherrypy.response.cookie[jwt_cookie] = ''
         cherrypy.response.cookie[jwt_cookie]['max-age'] = 0
         cherrypy.response.cookie[jwt_cookie]['path'] = plexpy.HTTP_ROOT.rstrip('/') or '/'
@@ -339,6 +367,7 @@ class AuthController(object):
             cherrypy.response.headers['Set-Cookie'] = jwt_cookie + '=""; max-age=0; path=/'
 
         cherrypy.request.login = None
+        cherrypy.lib.sessions.expire()
 
         if redirect_uri:
             redirect_uri = '?redirect_uri=' + redirect_uri
@@ -346,12 +375,9 @@ class AuthController(object):
         raise cherrypy.HTTPRedirect(plexpy.HTTP_ROOT + "auth/login" + redirect_uri)
 
     @cherrypy.expose
+    @cherrypy.tools.allow(methods=['POST'])
     @cherrypy.tools.json_out()
     def signin(self, username=None, password=None, token=None, remember_me='0', admin_login='0', *args, **kwargs):
-        if cherrypy.request.method != 'POST':
-            cherrypy.response.status = 405
-            return {'status': 'error', 'message': 'Sign in using POST.'}
-
         ip_address = cherrypy.request.remote.ip
         rate_limit = check_rate_limit(ip_address)
 
@@ -391,16 +417,19 @@ class AuthController(object):
                           expiry=expiry,
                           jwt_token=jwt_token)
 
-            jwt_cookie = str(JWT_COOKIE_NAME + plexpy.CONFIG.PMS_UUID)
+            jwt_cookie = jwt_cookie_name()
             cherrypy.response.cookie[jwt_cookie] = jwt_token
             cherrypy.response.cookie[jwt_cookie]['max-age'] = int(time_delta.total_seconds())
             cherrypy.response.cookie[jwt_cookie]['path'] = plexpy.HTTP_ROOT.rstrip('/') or '/'
             cherrypy.response.cookie[jwt_cookie]['httponly'] = True
             cherrypy.response.cookie[jwt_cookie]['samesite'] = 'lax'
 
+            if not cherrypy.session.locked:
+                cherrypy.session.acquire_lock()
+            cherrypy.session['_csrf_token'] = generate_csrf_token()
             cherrypy.request.login = payload
             cherrypy.response.status = 200
-            return {'status': 'success', 'token': jwt_token, 'uuid': plexpy.CONFIG.PMS_UUID}
+            return {'status': 'success', 'token': jwt_token, 'uuid': hash_pms_uuid()}
 
         elif admin_login == '1' and username:
             self.on_login(username=username)
@@ -421,8 +450,10 @@ class AuthController(object):
             return error_message
 
     @cherrypy.expose
+    @requireAuth()
     def redirect(self, redirect_uri='', *args, **kwargs):
         root = plexpy.HTTP_ROOT.rstrip('/')
         if redirect_uri.startswith(root):
             redirect_uri = redirect_uri[len(root):]
-        raise cherrypy.HTTPRedirect(plexpy.HTTP_ROOT + redirect_uri.strip('/'))
+        redirect_uri = redirect_uri.replace('\\', '/')
+        raise cherrypy.HTTPRedirect(plexpy.HTTP_ROOT + redirect_uri.strip('/ \t\r\n'))
