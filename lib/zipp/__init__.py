@@ -14,14 +14,11 @@ import pathlib
 import posixpath
 import re
 import stat
-import sys
 import zipfile
 
+from ._functools import none_as, save_method_args
 from .compat.py310 import text_encoding
 from .glob import Translator
-
-from ._functools import save_method_args
-
 
 __all__ = ['Path']
 
@@ -69,7 +66,7 @@ def _ancestry(path):
     path = path.rstrip(posixpath.sep)
     while path.rstrip(posixpath.sep):
         yield path
-        path, tail = posixpath.split(path)
+        path, _tail = posixpath.split(path)
 
 
 _dedupe = dict.fromkeys
@@ -159,10 +156,7 @@ class CompleteDirs(InitializedState, zipfile.ZipFile):
             return cls(source)
 
         # Only allow for FastLookup when supplied zipfile is read-only
-        if 'r' not in source.mode:
-            cls = CompleteDirs
-
-        source.__class__ = cls
+        source.__class__ = cls if 'r' in source.mode else CompleteDirs
         return source
 
     @classmethod
@@ -198,9 +192,7 @@ class FastLookup(CompleteDirs):
 
 
 def _extract_text_encoding(encoding=None, *args, **kwargs):
-    # compute stack level so that the caller of the caller sees any warning.
-    is_pypy = sys.implementation.name == 'pypy'
-    stack_level = 3 + is_pypy
+    stack_level = 3
     return text_encoding(encoding, stack_level), args, kwargs
 
 
@@ -276,7 +268,7 @@ class Path:
     resolve to the zipfile.
 
     >>> str(path)
-    'mem/abcde.zip/'
+    'mem/abcde.zip'
     >>> path.name
     'abcde.zip'
     >>> path.filename == pathlib.Path('mem/abcde.zip')
@@ -355,7 +347,7 @@ class Path:
         return io.TextIOWrapper(stream, encoding, *args, **kwargs)
 
     def _base(self):
-        return pathlib.PurePosixPath(self.at or self.root.filename)
+        return pathlib.PurePosixPath(self.at) if self.at else self.filename
 
     @property
     def name(self):
@@ -403,7 +395,7 @@ class Path:
 
     def iterdir(self):
         if not self.is_dir():
-            raise ValueError("Can't listdir a file")
+            raise NotADirectoryError("Can't listdir a file")
         subs = map(self._next, self.root.namelist())
         return filter(self._is_child, subs)
 
@@ -434,7 +426,8 @@ class Path:
         return posixpath.relpath(str(self), str(other.joinpath(*extra)))
 
     def __str__(self):
-        return posixpath.join(self.root.filename, self.at)
+        root = none_as(self.root.filename, ':zipfile:')
+        return posixpath.join(root, self.at) if self.at else root
 
     def __repr__(self):
         return self.__repr.format(self=self)

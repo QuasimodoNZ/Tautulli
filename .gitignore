@@ -18,6 +18,7 @@ version.lock
 lib/*.dist-info
 lib/*.egg-info
 lib/*.pth
+lib/*.pyd
 lib/*/*.pyd
 lib/_distutils_hack
 lib/pkg_resources
@@ -27,6 +28,7 @@ backups/*
 cache/*
 exports/*
 newsletters/*
+sessions/*
 *.mmdb
 version.txt
 branch.txt

@@ -21,6 +21,7 @@ import os
 import requests
 import shutil
 import threading
+import time
 
 from functools import partial, reduce
 from io import open
@@ -36,20 +37,20 @@ from plexpy.plex import Plex
 
 
 class Export(object):
-    # True/False for allowed (thumb, art, logo) image export
+    # True/False for allowed (thumb, art, logo, squareArt, theme) resource export
     MEDIA_TYPES = {
-        'movie': (True, True, True),
-        'show': (True, True, True),
-        'season': (True, True, True),
-        'episode': (False, False, True),
-        'artist': (True, True, False),
-        'album': (True, True, False),
-        'track': (False, False, False),
-        'photoalbum': (False, False, False),
-        'photo': (False, False, False),
-        'clip': (False, False, False),
-        'collection': (True, True, False),
-        'playlist': (True, True, False)
+        'movie': (True, True, True, True, True),
+        'show': (True, True, True, True, True),
+        'season': (True, True, True, True, False),
+        'episode': (False, False, False, False, False),
+        'artist': (True, True, True, True, True),
+        'album': (True, True, True, True, False),
+        'track': (False, False, False, False, False),
+        'photoalbum': (True, True, True, True, False),
+        'photo': (False, False, False, False, False),
+        'clip': (False, False, False, False, False),
+        'collection': (True, True, True, True, True),
+        'playlist': (True, True, True, True, False)
     }
     PLURAL_MEDIA_TYPES = {
         'movie': 'movies',
@@ -90,13 +91,13 @@ class Export(object):
     ]
     METADATA_LEVELS = (0, 1, 2, 3, 9)
     MEDIA_INFO_LEVELS = (0, 1, 2, 3, 9)
-    IMAGE_LEVELS = (0, 1, 2, 9)
+    RESOURCE_LEVELS = (0, 1, 2, 9)
     FILE_FORMATS = ('csv', 'json', 'xml', 'm3u')
     EXPORT_TYPES = ('all', 'collection', 'playlist')
 
     def __init__(self, section_id=None, user_id=None, rating_key=None, file_format='csv',
                  metadata_level=1, media_info_level=1,
-                 thumb_level=0, art_level=0, logo_level=0,
+                 thumb_level=0, art_level=0, logo_level=0, squareArt_level=0, theme_level=0,
                  custom_fields='', export_type='all', individual_files=False):
         self.section_id = helpers.cast_to_int(section_id) or None
         self.user_id = helpers.cast_to_int(user_id) or None
@@ -107,6 +108,8 @@ class Export(object):
         self.thumb_level = helpers.cast_to_int(thumb_level)
         self.art_level = helpers.cast_to_int(art_level)
         self.logo_level = helpers.cast_to_int(logo_level)
+        self.squareArt_level = helpers.cast_to_int(squareArt_level)
+        self.theme_level = helpers.cast_to_int(theme_level)
         self.custom_fields = custom_fields.replace(' ', '')
         self._custom_fields = {}
         self.export_type = str(export_type).lower() or 'all'
@@ -126,10 +129,15 @@ class Export(object):
         self.exported_thumb = False
         self.exported_art = False
         self.exported_logo = False
+        self.exported_squareArt = False
+        self.exported_theme = False
         self._reload_check_files = False
 
         self.total_items = 0
         self.exported_items = 0
+        self._exported_items_lock = threading.Lock()
+        self._last_progress_write = 0.0
+        self._export_attrs_cache = {}
         self.success = False
 
         # Reset export options for m3u
@@ -139,6 +147,8 @@ class Export(object):
             self.thumb_level = 0
             self.art_level = 0
             self.logo_level = 0
+            self.squareArt_level = 0
+            self.theme_level = 0
             self.custom_fields = ''
 
     def return_attrs(self, media_type, flatten=False):
@@ -150,10 +160,11 @@ class Export(object):
                 'addedAt': helpers.datetime_to_iso,
                 'art': None,
                 'artBlurHash': None,
-                'artFile': lambda o: self.get_image(o, 'art'),
-                'artProvider': lambda o: self.get_image_provider(o, 'art'),
+                'artFile': lambda o: self.get_resource(o, 'art'),
+                'artProvider': lambda o: self.get_resource_provider(o, 'art'),
                 'audienceRating': None,
                 'audienceRatingImage': None,
+                'canNormalizeLoudness': None,
                 'chapters': {
                     'id': None,
                     'tag': None,
@@ -207,9 +218,9 @@ class Export(object):
                 'librarySectionKey': None,
                 'librarySectionTitle': None,
                 'locations': None,
-                'logo': lambda o: next((i.url for i in o.images if i.type == 'clearLogo'), None),
-                'logoFile': lambda o: self.get_image(o, 'logo'),
-                'logoProvider': lambda o: self.get_image_provider(o, 'logo'),
+                'logo': None,
+                'logoFile': lambda o: self.get_resource(o, 'logo'),
+                'logoProvider': lambda o: self.get_resource_provider(o, 'logo'),
                 'markers': {
                     'end': None,
                     'final': None,
@@ -335,11 +346,19 @@ class Export(object):
                             'audioChannelLayout': None,
                             'bitDepth': None,
                             'bitrateMode': None,
+                            'canNormalizeLoudness': None,
                             'channels': None,
                             'duration': None,
+                            'gainOffset': None,
+                            'loudness': None,
+                            'loudnessAnalysisVersion': None,
+                            'lra': None,
+                            'peak': None,
                             'profile': None,
                             'samplingRate': None,
-                            'streamIdentifier': None
+                            'streamIdentifier': None,
+                            'threshold': None,
+                            'visualImpaired': None
                         },
                         'subtitleStreams': {
                             'canAutoSync': None,
@@ -362,6 +381,8 @@ class Export(object):
                             'forced': None,
                             'format': None,
                             'headerCompression': None,
+                            'hearingImpaired': None,
+                            'perfectMatch': None,
                             'providerTitle': None,
                             'score': None,
                             'sourceKey': None,
@@ -387,14 +408,19 @@ class Export(object):
                     'thumb': None
                 },
                 'slug': None,
+                'squareArt': None,
+                'squareArtFile': lambda o: self.get_resource(o, 'squareArt'),
+                'squareArtProvider': lambda o: self.get_resource_provider(o, 'squareArt'),
                 'studio': None,
                 'summary': None,
                 'tagline': None,
                 'theme': None,
+                'themeFile': lambda o: self.get_resource(o, 'theme'),
+                'themeProvider': lambda o: self.get_resource_provider(o, 'theme'),
                 'thumb': None,
                 'thumbBlurHash': None,
-                'thumbFile': lambda o: self.get_image(o, 'thumb'),
-                'thumbProvider': lambda o: self.get_image_provider(o, 'thumb'),
+                'thumbFile': lambda o: self.get_resource(o, 'thumb'),
+                'thumbProvider': lambda o: self.get_resource_provider(o, 'thumb'),
                 'title': None,
                 'titleSort': None,
                 'type': None,
@@ -416,8 +442,8 @@ class Export(object):
                 'addedAt': helpers.datetime_to_iso,
                 'art': None,
                 'artBlurHash': None,
-                'artFile': lambda o: self.get_image(o, 'art'),
-                'artProvider': lambda o: self.get_image_provider(o, 'art'),
+                'artFile': lambda o: self.get_resource(o, 'art'),
+                'artProvider': lambda o: self.get_resource_provider(o, 'art'),
                 'audienceRating': None,
                 'audienceRatingImage': None,
                 'audioLanguage': None,
@@ -431,6 +457,7 @@ class Export(object):
                 'contentRating': None,
                 'duration': None,
                 'durationHuman': lambda o: helpers.human_duration(getattr(o, 'duration', 0)),
+                'editionTitle': None,
                 'enableCreditsMarkerGeneration': None,
                 'episodeSort': None,
                 'fields': {
@@ -460,9 +487,9 @@ class Export(object):
                 'librarySectionKey': None,
                 'librarySectionTitle': None,
                 'locations': None,
-                'logo': lambda o: next((i.url for i in o.images if i.type == 'clearLogo'), None),
-                'logoFile': lambda o: self.get_image(o, 'logo'),
-                'logoProvider': lambda o: self.get_image_provider(o, 'logo'),
+                'logo': None,
+                'logoFile': lambda o: self.get_resource(o, 'logo'),
+                'logoProvider': lambda o: self.get_resource_provider(o, 'logo'),
                 'metadataDirectory': None,
                 'network': None,
                 'originallyAvailableAt': partial(helpers.datetime_to_iso, to_date=True),
@@ -478,16 +505,21 @@ class Export(object):
                 'seasonCount': None,
                 'showOrdering': None,
                 'slug': None,
+                'squareArt': None,
+                'squareArtFile': lambda o: self.get_resource(o, 'squareArt'),
+                'squareArtProvider': lambda o: self.get_resource_provider(o, 'squareArt'),
                 'studio': None,
                 'subtitleLanguage': None,
                 'subtitleMode': None,
                 'summary': None,
                 'tagline': None,
                 'theme': None,
+                'themeFile': lambda o: self.get_resource(o, 'theme'),
+                'themeProvider': lambda o: self.get_resource_provider(o, 'theme'),
                 'thumb': None,
                 'thumbBlurHash': None,
-                'thumbFile': lambda o: self.get_image(o, 'thumb'),
-                'thumbProvider': lambda o: self.get_image_provider(o, 'thumb'),
+                'thumbFile': lambda o: self.get_resource(o, 'thumb'),
+                'thumbProvider': lambda o: self.get_resource_provider(o, 'thumb'),
                 'title': None,
                 'titleSort': None,
                 'type': None,
@@ -506,13 +538,14 @@ class Export(object):
                 'addedAt': helpers.datetime_to_iso,
                 'art': None,
                 'artBlurHash': None,
-                'artFile': lambda o: self.get_image(o, 'art'),
-                'artProvider': lambda o: self.get_image_provider(o, 'art'),
+                'artFile': lambda o: self.get_resource(o, 'art'),
+                'artProvider': lambda o: self.get_resource_provider(o, 'art'),
                 'audioLanguage': None,
                 'collections': {
                     'id': None,
                     'tag': None
                 },
+                'editionTitle': None,
                 'fields': {
                     'name': None,
                     'locked': None
@@ -533,9 +566,9 @@ class Export(object):
                 'librarySectionID': None,
                 'librarySectionKey': None,
                 'librarySectionTitle': None,
-                'logo': lambda o: next((i.url for i in o.images if i.type == 'clearLogo'), None),
-                'logoFile': lambda o: self.get_image(o, 'logo'),
-                'logoProvider': lambda o: self.get_image_provider(o, 'logo'),
+                'logo': None,
+                'logoFile': lambda o: self.get_resource(o, 'logo'),
+                'logoProvider': lambda o: self.get_resource_provider(o, 'logo'),
                 'metadataDirectory': None,
                 'parentGuid': None,
                 'parentIndex': None,
@@ -548,13 +581,16 @@ class Export(object):
                 'ratingKey': None,
                 'seasonNumber': None,
                 'slug': None,
+                'squareArt': None,
+                'squareArtFile': lambda o: self.get_resource(o, 'squareArt'),
+                'squareArtProvider': lambda o: self.get_resource_provider(o, 'squareArt'),
                 'subtitleLanguage': None,
                 'subtitleMode': None,
                 'summary': None,
                 'thumb': None,
                 'thumbBlurHash': None,
-                'thumbFile': lambda o: self.get_image(o, 'thumb'),
-                'thumbProvider': lambda o: self.get_image_provider(o, 'thumb'),
+                'thumbFile': lambda o: self.get_resource(o, 'thumb'),
+                'thumbProvider': lambda o: self.get_resource_provider(o, 'thumb'),
                 'title': None,
                 'titleSort': None,
                 'type': None,
@@ -572,10 +608,11 @@ class Export(object):
                 'addedAt': helpers.datetime_to_iso,
                 'art': None,
                 'artBlurHash': None,
-                'artFile': lambda o: self.get_image(o, 'art'),
-                'artProvider': lambda o: self.get_image_provider(o, 'art'),
+                'artFile': lambda o: self.get_resource(o, 'art'),
+                'artProvider': lambda o: self.get_resource_provider(o, 'art'),
                 'audienceRating': None,
                 'audienceRatingImage': None,
+                'canNormalizeLoudness': None,
                 'chapters': {
                     'id': None,
                     'tag': None,
@@ -596,6 +633,7 @@ class Export(object):
                 },
                 'duration': None,
                 'durationHuman': lambda o: helpers.human_duration(getattr(o, 'duration', 0)),
+                'editionTitle': None,
                 'episodeNumber': None,
                 'fields': {
                     'name': None,
@@ -629,9 +667,9 @@ class Export(object):
                 'librarySectionKey': None,
                 'librarySectionTitle': None,
                 'locations': None,
-                'logo': lambda o: next((i.url for i in o.images if i.type == 'clearLogo'), None),
-                'logoFile': lambda o: self.get_image(o, 'logo'),
-                'logoProvider': lambda o: self.get_image_provider(o, 'logo'),
+                'logo': None,
+                'logoFile': lambda o: self.get_resource(o, 'logo'),
+                'logoProvider': lambda o: self.get_resource_provider(o, 'logo'),
                 'markers': {
                     'end': None,
                     'final': None,
@@ -726,7 +764,7 @@ class Export(object):
                             'frameRate': None,
                             'frameRateMode': None,
                             'hasScalingMatrix': None,
-                            'hdr': lambda o: helpers.is_hdr(getattr(o, 'bitDepth', 0), getattr(o, 'colorSpace', '')),
+                            'hdr': lambda o: helpers.is_hdr(getattr(o, 'bitDepth', 0), getattr(o, 'colorTrc', '')),
                             'height': None,
                             'level': None,
                             'pixelAspectRatio': None,
@@ -757,11 +795,19 @@ class Export(object):
                             'audioChannelLayout': None,
                             'bitDepth': None,
                             'bitrateMode': None,
+                            'canNormalizeLoudness': None,
                             'channels': None,
                             'duration': None,
+                            'gainOffset': None,
+                            'loudness': None,
+                            'loudnessAnalysisVersion': None,
+                            'lra': None,
+                            'peak': None,
                             'profile': None,
                             'samplingRate': None,
-                            'streamIdentifier': None
+                            'streamIdentifier': None,
+                            'threshold': None,
+                            'visualImpaired': None
                         },
                         'subtitleStreams': {
                             'canAutoSync': None,
@@ -784,6 +830,8 @@ class Export(object):
                             'forced': None,
                             'format': None,
                             'headerCompression': None,
+                            'hearingImpaired': None,
+                            'perfectMatch': None,
                             'providerTitle': None,
                             'score': None,
                             'sourceKey': None,
@@ -816,11 +864,14 @@ class Export(object):
                 'seasonEpisode': None,
                 'seasonNumber': None,
                 'slug': None,
+                'squareArt': None,
+                'squareArtFile': lambda o: self.get_resource(o, 'squareArt'),
+                'squareArtProvider': lambda o: self.get_resource_provider(o, 'squareArt'),
                 'summary': None,
                 'thumb': None,
                 'thumbBlurHash': None,
-                'thumbFile': lambda o: self.get_image(o, 'thumb'),
-                'thumbProvider': lambda o: self.get_image_provider(o, 'thumb'),
+                'thumbFile': lambda o: self.get_resource(o, 'thumb'),
+                'thumbProvider': lambda o: self.get_resource_provider(o, 'thumb'),
                 'title': None,
                 'titleSort': None,
                 'type': None,
@@ -842,8 +893,8 @@ class Export(object):
                 'albumSort': None,
                 'art': None,
                 'artBlurHash': None,
-                'artFile': lambda o: self.get_image(o, 'art'),
-                'artProvider': lambda o: self.get_image_provider(o, 'art'),
+                'artFile': lambda o: self.get_resource(o, 'art'),
+                'artProvider': lambda o: self.get_resource_provider(o, 'art'),
                 'collections': {
                     'id': None,
                     'tag': None
@@ -876,6 +927,9 @@ class Export(object):
                 'librarySectionKey': None,
                 'librarySectionTitle': None,
                 'locations': None,
+                'logo': None,
+                'logoFile': lambda o: self.get_resource(o, 'logo'),
+                'logoProvider': lambda o: self.get_resource_provider(o, 'logo'),
                 'metadataDirectory': None,
                 'moods': {
                     'id': None,
@@ -887,16 +941,21 @@ class Export(object):
                     'id': None,
                     'tag': None
                 },
+                'squareArt': None,
+                'squareArtFile': lambda o: self.get_resource(o, 'squareArt'),
+                'squareArtProvider': lambda o: self.get_resource_provider(o, 'squareArt'),
                 'styles': {
                     'id': None,
                     'tag': None
                 },
                 'summary': None,
                 'theme': None,
+                'themeFile': lambda o: self.get_resource(o, 'theme'),
+                'themeProvider': lambda o: self.get_resource_provider(o, 'theme'),
                 'thumb': None,
                 'thumbBlurHash': None,
-                'thumbFile': lambda o: self.get_image(o, 'thumb'),
-                'thumbProvider': lambda o: self.get_image_provider(o, 'thumb'),
+                'thumbFile': lambda o: self.get_resource(o, 'thumb'),
+                'thumbProvider': lambda o: self.get_resource_provider(o, 'thumb'),
                 'title': None,
                 'titleSort': None,
                 'type': None,
@@ -912,8 +971,8 @@ class Export(object):
                 'addedAt': helpers.datetime_to_iso,
                 'art': None,
                 'artBlurHash': None,
-                'artFile': lambda o: self.get_image(o, 'art'),
-                'artProvider': lambda o: self.get_image_provider(o, 'art'),
+                'artFile': lambda o: self.get_resource(o, 'art'),
+                'artProvider': lambda o: self.get_resource_provider(o, 'art'),
                 'collections': {
                     'id': None,
                     'tag': None
@@ -947,6 +1006,9 @@ class Export(object):
                 'librarySectionID': None,
                 'librarySectionKey': None,
                 'librarySectionTitle': None,
+                'logo': None,
+                'logoFile': lambda o: self.get_resource(o, 'logo'),
+                'logoProvider': lambda o: self.get_resource_provider(o, 'logo'),
                 'loudnessAnalysisVersion': None,
                 'metadataDirectory': None,
                 'moods': {
@@ -963,6 +1025,9 @@ class Export(object):
                 'parentTitle': None,
                 'rating': None,
                 'ratingKey': None,
+                'squareArt': None,
+                'squareArtFile': lambda o: self.get_resource(o, 'squareArt'),
+                'squareArtProvider': lambda o: self.get_resource_provider(o, 'squareArt'),
                 'studio': None,
                 'styles': {
                     'id': None,
@@ -975,8 +1040,8 @@ class Export(object):
                 'summary': None,
                 'thumb': None,
                 'thumbBlurHash': None,
-                'thumbFile': lambda o: self.get_image(o, 'thumb'),
-                'thumbProvider': lambda o: self.get_image_provider(o, 'thumb'),
+                'thumbFile': lambda o: self.get_resource(o, 'thumb'),
+                'thumbProvider': lambda o: self.get_resource_provider(o, 'thumb'),
                 'title': None,
                 'titleSort': None,
                 'type': None,
@@ -1098,7 +1163,9 @@ class Export(object):
                             'peak': None,
                             'profile': None,
                             'samplingRate': None,
-                            'startRamp': None
+                            'startRamp': None,
+                            'streamIdentifier': None,
+                            'visualImpaired': None
                         },
                         'lyricStreams': {
                             'codec': None,
@@ -1158,6 +1225,9 @@ class Export(object):
             _photo_album_attrs = {
                 'addedAt': helpers.datetime_to_iso,
                 'art': None,
+                'artBlurHash': None,
+                'artFile': lambda o: self.get_resource(o, 'art'),
+                'artProvider': lambda o: self.get_resource_provider(o, 'art'),
                 'composite': None,
                 'fields': {
                     'name': None,
@@ -1170,10 +1240,19 @@ class Export(object):
                 'librarySectionID': None,
                 'librarySectionKey': None,
                 'librarySectionTitle': None,
+                'logo': None,
+                'logoFile': lambda o: self.get_resource(o, 'logo'),
+                'logoProvider': lambda o: self.get_resource_provider(o, 'logo'),
                 'metadataDirectory': None,
                 'ratingKey': None,
+                'squareArt': None,
+                'squareArtFile': lambda o: self.get_resource(o, 'squareArt'),
+                'squareArtProvider': lambda o: self.get_resource_provider(o, 'squareArt'),
                 'summary': None,
                 'thumb': None,
+                'thumbBlurHash': None,
+                'thumbFile': lambda o: self.get_resource(o, 'thumb'),
+                'thumbProvider': lambda o: self.get_resource_provider(o, 'thumb'),
                 'title': None,
                 'titleSort': None,
                 'type': lambda e: 'photoalbum' if e == 'photo' else e,
@@ -1255,8 +1334,8 @@ class Export(object):
                 'addedAt': helpers.datetime_to_iso,
                 'art': None,
                 'artBlurHash': None,
-                'artFile': lambda o: self.get_image(o, 'art'),
-                'artProvider': lambda o: self.get_image_provider(o, 'art'),
+                'artFile': lambda o: self.get_resource(o, 'art'),
+                'artProvider': lambda o: self.get_resource_provider(o, 'art'),
                 'childCount': None,
                 'collectionFilterBasedOnUser': None,
                 'collectionMode': None,
@@ -1277,17 +1356,25 @@ class Export(object):
                 'librarySectionID': None,
                 'librarySectionKey': None,
                 'librarySectionTitle': None,
+                'logo': None,
+                'logoFile': lambda o: self.get_resource(o, 'logo'),
+                'logoProvider': lambda o: self.get_resource_provider(o, 'logo'),
                 'maxYear': None,
                 'metadataDirectory': None,
                 'minYear': None,
                 'ratingKey': None,
+                'squareArt': None,
+                'squareArtFile': lambda o: self.get_resource(o, 'squareArt'),
+                'squareArtProvider': lambda o: self.get_resource_provider(o, 'squareArt'),
                 'subtype': None,
                 'summary': None,
                 'theme': None,
+                'themeFile': lambda o: self.get_resource(o, 'theme'),
+                'themeProvider': lambda o: self.get_resource_provider(o, 'theme'),
                 'thumb': None,
                 'thumbBlurHash': None,
-                'thumbFile': lambda o: self.get_image(o, 'thumb'),
-                'thumbProvider': lambda o: self.get_image_provider(o, 'poster'),
+                'thumbFile': lambda o: self.get_resource(o, 'thumb'),
+                'thumbProvider': lambda o: self.get_resource_provider(o, 'poster'),
                 'title': None,
                 'titleSort': None,
                 'type': None,
@@ -1300,6 +1387,9 @@ class Export(object):
         def playlist_attrs():
             _playlist_attrs = {
                 'addedAt': helpers.datetime_to_iso,
+                'art': None,
+                'artFile': lambda o: self.get_resource(o, 'art'),
+                'artProvider': lambda o: self.get_resource_provider(o, 'art'),
                 'composite': None,
                 'content': None,
                 'duration': None,
@@ -1308,12 +1398,21 @@ class Export(object):
                 'icon': None,
                 'key': None,
                 'leafCount': None,
+                'logo': None,
+                'logoFile': lambda o: self.get_resource(o, 'logo'),
+                'logoProvider': lambda o: self.get_resource_provider(o, 'logo'),
                 'metadataDirectory': None,
                 'playlistType': None,
                 'ratingKey': None,
                 'smart': None,
                 'sourceURI': None,
+                'squareArt': None,
+                'squareArtFile': lambda o: self.get_resource(o, 'squareArt'),
+                'squareArtProvider': lambda o: self.get_resource_provider(o, 'squareArt'),
                 'summary': None,
+                'thumb': None,
+                'thumbFile': lambda o: self.get_resource(o, 'thumb'),
+                'thumbProvider': lambda o: self.get_resource_provider(o, 'poster'),
                 'title': None,
                 'type': None,
                 'updatedAt': helpers.datetime_to_iso,
@@ -1362,7 +1461,8 @@ class Export(object):
                 3: [
                     'art', 'thumb', 'key', 'chapterSource',
                     'chapters.tag', 'chapters.index', 'chapters.start', 'chapters.end', 'chapters.thumb',
-                    'updatedAt', 'lastViewedAt', 'viewCount', 'lastRatedAt', 'hasPreviewThumbnails', 'hasVoiceActivity'
+                    'updatedAt', 'lastViewedAt', 'viewCount', 'lastRatedAt',
+                    'hasPreviewThumbnails', 'hasVoiceActivity', 'canNormalizeLoudness',
                 ],
                 9: self._get_all_metadata_attrs(_media_type)
             }
@@ -1413,7 +1513,7 @@ class Export(object):
             _media_type = 'show'
             _metadata_levels = {
                 1: [
-                    'ratingKey', 'title', 'titleSort', 'originallyAvailableAt', 'originalTitle', 'year', 'addedAt',
+                    'ratingKey', 'title', 'titleSort', 'originallyAvailableAt', 'originalTitle', 'editionTitle', 'year', 'addedAt',
                     'rating', 'audienceRating', 'audienceRatingImage', 'userRating', 'contentRating', 'network',
                     'studio', 'tagline', 'summary', 'guid', 'duration', 'durationHuman', 'type', 'childCount', 'seasonCount',
                     'seasons'
@@ -1475,7 +1575,8 @@ class Export(object):
                 3: [
                     'art', 'thumb', 'key', 'chapterSource',
                     'chapters.tag', 'chapters.index', 'chapters.start', 'chapters.end', 'chapters.thumb',
-                    'updatedAt', 'lastViewedAt', 'viewCount', 'lastRatedAt', 'hasPreviewThumbnails', 'hasVoiceActivity',
+                    'updatedAt', 'lastViewedAt', 'viewCount', 'lastRatedAt',
+                    'hasPreviewThumbnails', 'hasVoiceActivity', 'canNormalizeLoudness',
                     'parentThumb', 'parentKey',
                     'grandparentArt', 'grandparentThumb', 'grandparentTheme', 'grandparentKey'
                 ],
@@ -1770,10 +1871,16 @@ class Export(object):
             if attr in child_media_types:
                 continue
 
+            # Level 9 leaves out an attribute whose top level key is in no level list.
+            # It gets the level above 9 and only exports as a custom field.
+            root_attr = attr.split('.')[0]
+            max_metadata_level = max(self.METADATA_LEVELS) + (0 if root_attr in metadata_levels else 1)
+            max_media_info_level = max(self.MEDIA_INFO_LEVELS) + (0 if root_attr in media_info_levels else 1)
+
             metadata_level = metadata_levels.get(
-                attr, max(self.METADATA_LEVELS) if not self.is_media_info_attr(attr) else None)
+                attr, max_metadata_level if not self.is_media_info_attr(attr) else None)
             media_info_level = media_info_levels.get(
-                attr, max(self.MEDIA_INFO_LEVELS) if self.is_media_info_attr(attr) else None)
+                attr, max_media_info_level if self.is_media_info_attr(attr) else None)
 
             if metadata_level is not None:
                 metadata_levels_map[prefix + attr] = metadata_level
@@ -1787,27 +1894,31 @@ class Export(object):
         if not self.section_id and not self.user_id and not self.rating_key:
             msg = "Export called but no section_id, user_id, or rating_key provided."
         elif self.metadata_level not in self.METADATA_LEVELS:
-            msg = "Export called with invalid metadata_level '{}'.".format(self.metadata_level)
+            msg = f"Export called with invalid metadata_level '{self.metadata_level}'."
         elif self.media_info_level not in self.MEDIA_INFO_LEVELS:
-            msg = "Export called with invalid media_info_level '{}'.".format(self.media_info_level)
-        elif self.thumb_level not in self.IMAGE_LEVELS:
-            msg = "Export called with invalid thumb_level '{}'.".format(self.thumb_level)
-        elif self.art_level not in self.IMAGE_LEVELS:
-            msg = "Export called with invalid art_level '{}'.".format(self.art_level)
-        elif self.logo_level not in self.IMAGE_LEVELS:
-            msg = "Export called with invalid logo_level '{}'.".format(self.logo_level)
+            msg = f"Export called with invalid media_info_level '{self.media_info_level}'."
+        elif self.thumb_level not in self.RESOURCE_LEVELS:
+            msg = f"Export called with invalid thumb_level '{self.thumb_level}'."
+        elif self.art_level not in self.RESOURCE_LEVELS:
+            msg = f"Export called with invalid art_level '{self.art_level}'."
+        elif self.logo_level not in self.RESOURCE_LEVELS:
+            msg = f"Export called with invalid logo_level '{self.logo_level}'."
+        elif self.squareArt_level not in self.RESOURCE_LEVELS:
+            msg = f"Export called with invalid squareArt_level '{self.squareArt_level}'."
+        elif self.theme_level not in self.RESOURCE_LEVELS:
+            msg = f"Export called with invalid theme_level '{self.theme_level}'."
         elif self.file_format not in self.FILE_FORMATS:
-            msg = "Export called with invalid file_format '{}'.".format(self.file_format)
+            msg = f"Export called with invalid file_format '{self.file_format}'."
         elif self.export_type not in self.EXPORT_TYPES:
-            msg = "Export called with invalid export_type '{}'.".format(self.export_type)
+            msg = f"Export called with invalid export_type '{self.export_type}'."
         elif self.user_id and self.export_type != 'playlist':
-            msg = "Export called with invalid export_type '{}'. " \
+            msg = f"Export called with invalid export_type '{self.export_type}'. " \
                   "Only export_type 'playlist' is allowed for user export."
         elif self.individual_files and self.rating_key:
             msg = "Individual file export is only allowed for library or user export."
 
         if msg:
-            logger.error("Tautulli Exporter :: %s", msg)
+            logger.warn("Tautulli Exporter :: %s", msg)
             return msg
 
         if self.user_id:
@@ -1823,10 +1934,12 @@ class Export(object):
         if self.rating_key:
             logger.debug(
                 "Tautulli Exporter :: Export called with rating_key %s, "
-                "metadata_level %d, media_info_level %d, thumb_level %s, art_level %s, logo_level %s, "
+                "metadata_level %d, media_info_level %d,"
+                "thumb_level %s, art_level %s, logo_level %s, squareArt_level %s, theme_level %s, "
                 "file_format %s",
                 self.rating_key, self.metadata_level, self.media_info_level,
-                self.thumb_level, self.art_level, self.logo_level, self.file_format)
+                self.thumb_level, self.art_level, self.logo_level, self.squareArt_level, self.theme_level,
+                self.file_format)
 
             self.obj = plex.get_item(self.rating_key)
             self.media_type = self._media_type(self.obj)
@@ -1842,10 +1955,12 @@ class Export(object):
         elif self.user_id:
             logger.debug(
                 "Tautulli Exporter :: Export called with user_id %s, "
-                "metadata_level %d, media_info_level %d, thumb_level %s, art_level %s, logo_level %s, "
+                "metadata_level %d, media_info_level %d,"
+                "thumb_level %s, art_level %s, logo_level %s, squareArt_level %s, theme_level %s, "
                 "export_type %s, file_format %s",
                 self.user_id, self.metadata_level, self.media_info_level,
-                self.thumb_level, self.art_level, self.logo_level, self.export_type, self.file_format)
+                self.thumb_level, self.art_level, self.logo_level, self.squareArt_level, self.theme_level,
+                self.export_type, self.file_format)
 
             self.obj = plex.PlexServer
             self.media_type = self.export_type
@@ -1855,10 +1970,12 @@ class Export(object):
         elif self.section_id:
             logger.debug(
                 "Tautulli Exporter :: Export called with section_id %s, "
-                "metadata_level %d, media_info_level %d, thumb_level %s, art_level %s, logo_level %s, "
+                "metadata_level %d, media_info_level %d,"
+                "thumb_level %s, art_level %s, logo_level %s, squareArt_level %s, theme_level %s, "
                 "export_type %s, file_format %s",
                 self.section_id, self.metadata_level, self.media_info_level,
-                self.thumb_level, self.art_level, self.logo_level, self.export_type, self.file_format)
+                self.thumb_level, self.art_level, self.logo_level, self.squareArt_level, self.theme_level,
+                self.export_type, self.file_format)
 
             self.obj = plex.get_library(self.section_id)
             if self.export_type == 'all':
@@ -1870,12 +1987,12 @@ class Export(object):
 
         else:
             msg = "Export called but no section_id, user_id, or rating_key provided."
-            logger.error("Tautulli Exporter :: %s", msg)
+            logger.warn("Tautulli Exporter :: %s", msg)
             return msg
 
         if self.media_type not in self.MEDIA_TYPES:
-            msg = "Cannot export media type '{}'.".format(self.media_type)
-            logger.error("Tautulli Exporter :: %s", msg)
+            msg = f"Cannot export media type '{self.media_type}'."
+            logger.warn("Tautulli Exporter :: %s", msg)
             return msg
 
         if not self.MEDIA_TYPES[self.media_type][0]:
@@ -1884,6 +2001,10 @@ class Export(object):
             self.art_level = 0
         if not self.MEDIA_TYPES[self.media_type][2]:
             self.logo_level = 0
+        if not self.MEDIA_TYPES[self.media_type][3]:
+            self.squareArt_level = 0
+        if not self.MEDIA_TYPES[self.media_type][4]:
+            self.theme_level = 0
 
         self._process_custom_fields()
 
@@ -1893,7 +2014,7 @@ class Export(object):
 
         self.export_id = self.add_export()
         if not self.export_id:
-            msg = "Failed to export '{}'.".format(self.directory)
+            msg = f"Failed to export '{self.directory}'."
             logger.error("Tautulli Exporter :: %s", msg)
             return msg
 
@@ -1918,6 +2039,8 @@ class Export(object):
             'thumb_level': self.thumb_level,
             'art_level': self.art_level,
             'logo_level': self.logo_level,
+            'squareArt_level': self.squareArt_level,
+            'theme_level': self.theme_level,
             'custom_fields': self.custom_fields,
             'individual_files': self.individual_files
         }
@@ -1927,7 +2050,7 @@ class Export(object):
             db.upsert(table_name='exports', key_dict=keys, value_dict=values)
             return db.last_insert_id()
         except Exception as e:
-            logger.error("Tautulli Exporter :: Unable to save export to database: %s", e)
+            logger.exception("Tautulli Exporter :: Unable to save export to database: %s", e)
             return False
 
     def set_export_state(self):
@@ -1943,6 +2066,8 @@ class Export(object):
             'thumb_level': self.thumb_level,
             'art_level': self.art_level,
             'logo_level': self.logo_level,
+            'squareArt_level': self.squareArt_level,
+            'theme_level': self.theme_level,
             'complete': complete,
             'file_size': self.file_size
         }
@@ -1950,7 +2075,15 @@ class Export(object):
         db = database.MonitorDatabase()
         db.upsert(table_name='exports', key_dict=keys, value_dict=values)
 
-    def set_export_progress(self):
+    def set_export_progress(self, flush=False):
+        # Progress is written by every pool worker; throttle to roughly
+        # once per second so a large export does not issue one write
+        # transaction per exported item
+        now = time.time()
+        if not flush and now - self._last_progress_write < 1:
+            return
+        self._last_progress_write = now
+
         keys = {
             'id': self.export_id
         }
@@ -1990,15 +2123,17 @@ class Export(object):
             if self.individual_files:
                 for item, item_result in zip(items, result):
                     self._save_file([item_result], obj=item)
-                    self._exported_images(item.title)
+                    self._exported_resources(item.title)
 
             else:
                 self._save_file(result, obj=self)
-                self._exported_images(self.title)
+                self._exported_resources(self.title)
 
             self.thumb_level = self.thumb_level or 10 if self.exported_thumb else 0
             self.art_level = self.art_level or 10 if self.exported_art else 0
             self.logo_level = self.logo_level or 10 if self.exported_logo else 0
+            self.squareArt_level = self.squareArt_level or 10 if self.exported_squareArt else 0
+            self.theme_level = self.theme_level or 10 if self.exported_theme else 0
 
             self.file_size += sum(item.file_size for item in items)
 
@@ -2013,11 +2148,14 @@ class Export(object):
         finally:
             pool.close()
             pool.join()
+            self.set_export_progress(flush=True)
             self.set_export_state()
 
     def _do_export(self, item):
         result = item._export_obj()
-        self.exported_items += 1
+        # Incremented from multiple pool threads
+        with self._exported_items_lock:
+            self.exported_items += 1
         self.set_export_progress()
         return result
 
@@ -2057,7 +2195,7 @@ class Export(object):
 
         self.file_size += os.path.getsize(filepath)
 
-    def _exported_images(self, title):
+    def _exported_resources(self, title):
         dirpath = get_export_dirpath(self.directory)
 
         for root, dirs, files in os.walk(dirpath):
@@ -2065,8 +2203,12 @@ class Export(object):
                 self.exported_thumb = True
             elif any(f.endswith('.art.jpg') for f in files):
                 self.exported_art = True
-            elif any(f.endswith('.logo.jpg') for f in files):
+            elif any(f.endswith('.logo.png') for f in files):
                 self.exported_logo = True
+            elif any(f.endswith('.squareArt.jpg') for f in files):
+                self.exported_squareArt = True
+            elif any(f.endswith('.theme.mp3') for f in files):
+                self.exported_theme = True
 
     def _media_type(self, obj):
         return 'photoalbum' if self.is_photoalbum(obj) else obj.type
@@ -2078,20 +2220,16 @@ class Export(object):
                 title = obj._defaultSyncTitle()
             else:
                 title = obj.title
-            filename = '{} - {} [{}]'.format(
-                media_type.capitalize(), title, obj.ratingKey)
+            filename = f'{media_type.capitalize()} - {helpers.truncate_title(title)} [{obj.ratingKey}]'
 
         elif self.rating_key:
-            filename = '{} - {} [{}]'.format(
-                self.media_type.capitalize(), self.obj_title, self.rating_key)
+            filename = f'{self.media_type.capitalize()} - {helpers.truncate_title(self.obj_title)} [{self.rating_key}]'
 
         elif self.user_id:
-            filename = 'User - {} - {} [{}]'.format(
-                self.obj_title, self.export_type.capitalize(), self.user_id)
+            filename = f'User - {helpers.truncate_title(self.obj_title)} - {self.export_type.capitalize()} [{self.user_id}]'
 
         elif self.section_id:
-            filename = 'Library - {} - {} [{}]'.format(
-                self.obj_title, self.export_type.capitalize(), self.section_id)
+            filename = f'Library - {helpers.truncate_title(self.obj_title)} - {self.export_type.capitalize()} [{self.section_id}]'
 
         else:
             filename = 'Export - Unknown'
@@ -2138,11 +2276,18 @@ class Export(object):
         return media_type, field
 
     def _get_all_metadata_attrs(self, media_type):
-        exclude_attrs = ('locations', 'media', 'artFile', 'thumbFile', 'logoFile')
+        exclude_attrs = ('locations', 'media', 'artFile', 'thumbFile', 'logoFile', 'squareArtFile', 'themeFile')
         all_attrs = self.return_attrs(media_type)
         return [attr for attr in all_attrs if attr not in exclude_attrs]
 
     def _get_export_attrs(self, media_type):
+        # The attribute and level maps are enormous nested literals that
+        # were rebuilt for every exported object (twice for level 9);
+        # they are constant per media type for the export's lifetime
+        cached = self._export_attrs_cache.get(media_type)
+        if cached is not None:
+            return cached
+
         media_attrs = self.return_attrs(media_type)
         metadata_level_attrs, media_info_level_attrs = self.return_levels(media_type)
 
@@ -2166,6 +2311,12 @@ class Export(object):
         if self.logo_level:
             if 'logoFile' in media_attrs and self.MEDIA_TYPES[media_type][2]:
                 export_attrs_set.add('logoFile')
+        if self.squareArt_level:
+            if 'squareArtFile' in media_attrs and self.MEDIA_TYPES[media_type][3]:
+                export_attrs_set.add('squareArtFile')
+        if self.theme_level:
+            if 'themeFile' in media_attrs and self.MEDIA_TYPES[media_type][4]:
+                export_attrs_set.add('themeFile')
 
         if media_type in self._custom_fields:
             export_attrs_set.update(self._custom_fields[media_type])
@@ -2193,7 +2344,9 @@ class Export(object):
 
             export_attrs_list.append(value)
 
-        return reduce(helpers.dict_merge, export_attrs_list, {})
+        export_attrs = reduce(helpers.dict_merge, export_attrs_list, {})
+        self._export_attrs_cache[media_type] = export_attrs
+        return export_attrs
 
     @staticmethod
     def is_media_info_attr(attr):
@@ -2249,7 +2402,7 @@ class Export(object):
         for d in data:
             if d.get('locations', []):
                 if 'grandparentTitle' in d:
-                    full_title = '{} - {}'.format(d.get('originalTitle') or d['grandparentTitle'], d['title'])
+                    full_title = f'{d.get("originalTitle") or d["grandparentTitle"]} - {d["title"]}'
                 else:
                     full_title = d['title']
                 metadata = {
@@ -2286,56 +2439,80 @@ class Export(object):
         media = helpers.get_attrs_to_dict(item, attrs)
         return any(vs.get('hdr') for p in media.get('parts', []) for vs in p.get('videoStreams', []))
 
-    def _get_cached_images(self, item, image):
-        if image == 'art':
+    def _get_cached_resources(self, item, resource):
+        if resource == 'art':
             if not hasattr(item, '_arts'):
                 item._arts = item.arts()
             return getattr(item, '_arts', [])
-        elif image == 'logo':
+        elif resource == 'logo':
             if not hasattr(item, '_logos'):
                 item._logos = item.logos()
             return getattr(item, '_logos', [])
+        elif resource == 'squareArt':
+            if not hasattr(item, '_squareArts'):
+                item._squareArts = item.squareArts()
+            return getattr(item, '_squareArts', [])
+        elif resource == 'theme':
+            if not hasattr(item, '_themes'):
+                item._themes = item.themes()
+            return getattr(item, '_themes', [])
         else:
             if not hasattr(item, '_posters'):
                 item._posters = item.posters()
             return getattr(item, '_posters', [])
         
-    def _get_selected_image(self, item, image):
-        images = self._get_cached_images(item, image)
-        return next((im for im in images if im.selected), None)
+    def _fetch_selected_resource(self, item, resource):
+        resources = self._get_cached_resources(item, resource)
+        return next((src for src in resources if src.selected), None)
 
-    def get_image(self, item, image):
+    def get_resource(self, item, resource):
         media_type = item.type
         rating_key = item.ratingKey
 
-        export_image = True
-        if self.thumb_level == 1 or self.art_level == 1 or self.logo_level == 1:
-            selected = self._get_selected_image(item, image)
-            export_image = selected and selected.ratingKey.startswith('upload://')
-        elif self.thumb_level == 2 or self.art_level == 2 or self.logo_level == 2:
-            export_image = any(field.locked and field.name == image
+        export_resource = True
+        if (
+            self.thumb_level == 1 or self.art_level == 1 or
+            self.logo_level == 1 or self.squareArt_level == 1 or
+            self.theme_level == 1
+        ):
+            selected = self._fetch_selected_resource(item, resource)
+            export_resource = selected and selected.ratingKey.startswith('upload://')
+        elif (
+            self.thumb_level == 2 or self.art_level == 2 or
+            self.logo_level == 2 or self.squareArt_level == 2 or
+            self.theme_level == 2
+        ):
+            export_resource = any(field.locked and field.name == resource
                                for field in item.fields)
-        elif self.thumb_level == 9 or self.art_level == 9 or self.logo_level == 9:
-            export_image = True
+        elif (
+            self.thumb_level == 9 or self.art_level == 9 or
+            self.logo_level == 9 or self.squareArt_level == 9 or
+            self.theme_level == 9
+        ):
+            export_resource = True
 
-        if not export_image and image + 'File' in self._custom_fields.get(media_type, set()):
-            export_image = True
+        if not export_resource and resource + 'File' in self._custom_fields.get(media_type, set()):
+            export_resource = True
 
-        if not export_image:
+        if not export_resource:
             return
 
-        image_url = None
-        if image == 'thumb':
-            image_url = item.thumbUrl
-        elif image == 'art':
-            image_url = item.artUrl
-        elif image == 'logo':
-            image_url = item.logoUrl
+        resource_url = None
+        if resource == 'thumb':
+            resource_url = item.thumbUrl
+        elif resource == 'art':
+            resource_url = item.artUrl
+        elif resource == 'logo':
+            resource_url = item.logoUrl
+        elif resource == 'squareArt':
+            resource_url = item.squareArtUrl
+        elif resource == 'theme':
+            resource_url = item.themeUrl
 
-        if not image_url:
+        if not resource_url:
             return
 
-        r = requests.get(image_url, stream=True)
+        r = requests.get(resource_url, stream=True)
         if r.status_code != 200:
             return
 
@@ -2344,8 +2521,14 @@ class Export(object):
         else:
             item_title = item.title
 
-        dirpath = get_export_dirpath(self.directory, images_directory=self.title)
-        filename = helpers.clean_filename('{} [{}].{}.jpg'.format(item_title, rating_key, image))
+        dirpath = get_export_dirpath(self.directory, resources_directory=self.title)
+        if resource == 'theme':
+            ext = 'mp3'
+        elif resource == 'logo':
+            ext = 'png'
+        else:
+            ext = 'jpg'
+        filename = helpers.clean_filename(f'{helpers.truncate_title(item_title)} [{rating_key}].{resource}.{ext}')
         filepath = os.path.join(dirpath, filename)
 
         if not os.path.exists(dirpath):
@@ -2359,8 +2542,8 @@ class Export(object):
 
         return os.path.join(os.path.basename(dirpath), filename)
 
-    def get_image_provider(self, item, image):
-        selected = self._get_selected_image(item, image)
+    def get_resource_provider(self, item, resource):
+        selected = self._fetch_selected_resource(item, resource)
         if selected:
             return 'upload' if selected.ratingKey.startswith('upload://') else selected.provider
 
@@ -2383,7 +2566,8 @@ class ExportObject(Export):
 
 def get_export(export_id):
     db = database.MonitorDatabase()
-    result = db.select_single("SELECT timestamp, title, file_format, thumb_level, art_level, logo_level, "
+    result = db.select_single("SELECT timestamp, title, file_format,"
+                              "thumb_level, art_level, logo_level, squareArt_level, theme_level, "
                               "individual_files, complete "
                               "FROM exports WHERE id = ?",
                               [export_id])
@@ -2393,7 +2577,7 @@ def get_export(export_id):
             result['filename'] = None
             result['exists'] = check_export_exists(result['title'], result['timestamp'])
         else:
-            result['filename'] = '{}.{}'.format(result['title'], result['file_format'])
+            result['filename'] = f'{result["title"]}.{result["file_format"]}'
             result['exists'] = check_export_exists(result['title'], result['timestamp'], result['filename'])
 
     return result
@@ -2445,11 +2629,6 @@ def cancel_exports():
 
 
 def get_export_datatable(section_id=None, user_id=None, rating_key=None, kwargs=None):
-    default_return = {'recordsFiltered': 0,
-                      'recordsTotal': 0,
-                      'draw': 0,
-                      'data': []}
-
     data_tables = datatables.DataTables()
 
     custom_where = []
@@ -2476,6 +2655,8 @@ def get_export_datatable(section_id=None, user_id=None, rating_key=None, kwargs=
                "exports.thumb_level",
                "exports.art_level",
                "exports.logo_level",
+               "exports.squareArt_level",
+               "exports.theme_level",
                "exports.custom_fields",
                "exports.individual_files",
                "exports.file_size",
@@ -2493,8 +2674,8 @@ def get_export_datatable(section_id=None, user_id=None, rating_key=None, kwargs=
                                       join_evals=[],
                                       kwargs=kwargs)
     except Exception as e:
-        logger.warn("Tautulli Exporter :: Unable to execute database query for get_export_datatable: %s.", e)
-        return default_return
+        logger.exception("Tautulli Exporter :: Unable to execute database query for get_export_datatable: %s.", e)
+        return
 
     result = query['result']
 
@@ -2522,6 +2703,8 @@ def get_export_datatable(section_id=None, user_id=None, rating_key=None, kwargs=
                'thumb_level': item['thumb_level'],
                'art_level': item['art_level'],
                'logo_level': item['logo_level'],
+               'squareArt_level': item['squareArt_level'],
+               'theme_level': item['theme_level'],
                'custom_fields': item['custom_fields'],
                'individual_files': item['individual_files'],
                'file_size': item['file_size'],
@@ -2543,19 +2726,19 @@ def get_export_datatable(section_id=None, user_id=None, rating_key=None, kwargs=
 
 
 def format_export_directory(title, timestamp):
-    return '{}.{}'.format(title, helpers.timestamp_to_YMDHMS(timestamp))
+    return f'{title}.{helpers.timestamp_to_YMDHMS(timestamp)}'
 
 
 def format_export_filename(title, file_format):
-    return '{}.{}'.format(title, file_format)
+    return f'{title}.{file_format}'
 
 
-def get_export_dirpath(title, timestamp=None, images_directory=None):
+def get_export_dirpath(title, timestamp=None, resources_directory=None):
     if timestamp:
         title = format_export_directory(title, timestamp)
     dirpath = os.path.join(plexpy.CONFIG.EXPORT_DIR, title)
-    if images_directory:
-        dirpath = os.path.join(dirpath, '{}.images'.format(images_directory))
+    if resources_directory:
+        dirpath = os.path.join(dirpath, f'{resources_directory}.resources')
     return dirpath
 
 
@@ -2578,7 +2761,7 @@ def get_custom_fields(media_type, sub_media_type=None):
 
     collection_sub_media_types = {'movie', 'show', 'artist', 'album', 'photoalbum'}
     playlist_sub_media_types = {'video', 'audio', 'photo'}
-    sub_media_type = {s.strip().lower() for s in sub_media_type.split(',')}
+    sub_media_type = {s.strip().lower() for s in (sub_media_type or '').split(',')}
 
     export = Export()
 
@@ -2636,7 +2819,7 @@ def get_custom_fields(media_type, sub_media_type=None):
 def build_export_docs():
     export = Export()
 
-    section_head = '### <a id="{anchor}">{section}</a>\n\n'
+    section_head = '### {section}\n\n'
     section_details = '<details>\n' \
                       '<summary><strong>{field_type} Fields</strong></summary><br>\n\n' \
                       '{table}\n' \
@@ -2652,10 +2835,15 @@ def build_export_docs():
             child_plural_media_type = export.PLURAL_MEDIA_TYPES[child_media_type]
             if child_media_type == 'photoalbum':
                 child_section_title = 'Photo Albums'
+                child_anchor = 'photo-albums'
+            elif child_media_type == 'item':
+                child_section_title = 'Items'
+                child_anchor = f'{_media_type}-item'
             else:
                 child_section_title = child_plural_media_type.capitalize()
-            child_text = u'\u2713<br>Includes [{}](#{}-{}) Level {{}}'.format(
-                child_section_title, media_type, child_media_type)
+                child_anchor = child_plural_media_type
+            child_text = u'\u2713<br>Includes [{}](#{}) Level {{}}'.format(
+                child_section_title, child_anchor)
             child_row = {
                 'attr': child_plural_media_type,
                 'level0': '',
@@ -2669,7 +2857,7 @@ def build_export_docs():
 
     sections = []
 
-    for media_type, (thumb, art, logo) in export.MEDIA_TYPES.items():
+    for media_type, (thumb, art, logo, squareArt, theme) in export.MEDIA_TYPES.items():
         if media_type == 'photoalbum':
             section_title = 'Photo Albums'
         else:
@@ -2683,8 +2871,14 @@ def build_export_docs():
         # Metadata Fields table
         table_rows = []
         for attr, level in sorted(metadata_levels_map.items(), key=helpers.sort_attrs):
-            if thumb and attr == 'thumbFile' or art and attr == 'artFile' or logo and attr == 'logoFile':
-                text = 'Refer to [Image Exports](#image-export)'
+            if (
+                thumb and attr == 'thumbFile' or
+                art and attr == 'artFile' or
+                logo and attr == 'logoFile' or
+                squareArt and attr == 'squareArtFile' or
+                theme and attr == 'themeFile'
+            ):
+                text = 'Refer to [Resource Exports](#resource-exports)'
                 row = {
                     'attr': attr,
                     'level0': text,
@@ -2728,15 +2922,15 @@ def build_export_docs():
         if media_type == 'collection':
             section += (
                 '\n\n* <a id="collection-item">**Note:**</a> Collection `items` can be '
-                '[Movies](#movie), '
-                '[Shows](#show), [Seasons](#season), [Episodes](#episode), '
-                '[Artists](#artist), [Albums](#album), or [Tracks](#track) '
+                '[Movies](#movies), '
+                '[Shows](#shows), [Seasons](#seasons), [Episodes](#episodes), '
+                '[Artists](#artists), [Albums](#albums), or [Tracks](#tracks) '
                 'depending on the type of collection.'
             )
         elif media_type == 'playlist':
             section += (
                 '\n\n* <a id="playlist-item">**Note:**</a> Playlist `items` can be '
-                '[Movies](#movie), [Episodes](#episode), [Tracks](#track), or [Photos](#photo) '
+                '[Movies](#movies), [Episodes](#episodes), [Tracks](#tracks), or [Photos](#photos) '
                 'depending on the type of playlist.'
             )
 

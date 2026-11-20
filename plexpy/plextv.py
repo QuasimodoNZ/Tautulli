@@ -39,7 +39,6 @@ def get_server_resources(return_presence=False, return_server=False, return_info
               'pms_ip': plexpy.CONFIG.PMS_IP,
               'pms_port': plexpy.CONFIG.PMS_PORT,
               'pms_ssl': plexpy.CONFIG.PMS_SSL,
-              'pms_is_cloud': plexpy.CONFIG.PMS_IS_CLOUD,
               'pms_url': plexpy.CONFIG.PMS_URL,
               'pms_url_manual': plexpy.CONFIG.PMS_URL_MANUAL,
               'pms_identifier': plexpy.CONFIG.PMS_IDENTIFIER,
@@ -51,10 +50,10 @@ def get_server_resources(return_presence=False, return_server=False, return_info
 
     if kwargs:
         server.update(kwargs)
-        for k in ['pms_ssl', 'pms_is_cloud', 'pms_url_manual']:
+        for k in ['pms_ssl', 'pms_url_manual']:
             server[k] = int(server[k])
 
-    if server['pms_url_manual'] and server['pms_ssl'] or server['pms_is_cloud']:
+    if server['pms_url_manual'] and server['pms_ssl']:
         scheme = 'https'
     else:
         scheme = 'http'
@@ -64,7 +63,6 @@ def get_server_resources(return_presence=False, return_server=False, return_info
                                                          port=server['pms_port'])
 
     plex_tv = PlexTV()
-    plex_tv.ping()
     result = plex_tv.get_server_connections(pms_identifier=server['pms_identifier'],
                                             pms_ip=server['pms_ip'],
                                             pms_port=server['pms_port'],
@@ -116,6 +114,16 @@ def get_server_resources(return_presence=False, return_server=False, return_info
 
     plexpy.CONFIG.process_kwargs(server)
     plexpy.CONFIG.write()
+
+
+def notify_token_expired():
+    token = plexpy.CONFIG.PMS_TOKEN
+    token_valid = PlexTV().check_token()
+    if token_valid is False:
+        plexpy.PLEXTV_BAD_TOKEN = token
+        plexpy.NOTIFY_QUEUE.put({'notify_action': 'on_tokenexpired'})
+    elif token_valid:
+        plexpy.PLEXTV_BAD_TOKEN = None
 
 
 class PlexTV(object):
@@ -198,7 +206,7 @@ class PlexTV(object):
                            }
                     return pin
                 else:
-                    logger.warn("Tautulli PlexTV :: Could not get Plex authentication pin.")
+                    logger.error("Tautulli PlexTV :: Could not get Plex authentication pin.")
                     return None
 
             except Exception as e:
@@ -256,14 +264,13 @@ class PlexTV(object):
 
         return request
 
-    def get_plextv_resources(self, include_https=False, return_response=False, output_format=''):
+    def get_plextv_resources(self, include_https=False, output_format=''):
         if include_https:
             uri = '/api/resources?includeHttps=1'
         else:
             uri = '/api/resources'
         request = self.request_handler.make_request(uri=uri,
                                                     request_type='GET',
-                                                    return_response=return_response,
                                                     output_format=output_format)
 
         return request
@@ -272,7 +279,7 @@ class PlexTV(object):
         if plexpass:
             uri = '/api/downloads/5.json?channel=plexpass'
         else:
-            uri = '/api/downloads/1.json'
+            uri = '/api/downloads/5.json'
         request = self.request_handler.make_request(uri=uri,
                                                     request_type='GET',
                                                     output_format=output_format)
@@ -303,14 +310,6 @@ class PlexTV(object):
 
         return request
 
-    def cloud_server_status(self, output_format=''):
-        uri = '/api/v2/cloud_server'
-        request = self.request_handler.make_request(uri=uri,
-                                                    request_type='GET',
-                                                    output_format=output_format)
-
-        return request
-
     def get_public_ip(self, output_format=''):
         uri = '/:/ip'
         request = self.request_handler.make_request(uri=uri,
@@ -327,11 +326,13 @@ class PlexTV(object):
 
         return request
 
-    def ping_plextv(self, output_format=''):
+    def ping_plextv(self, return_response=False, output_format=''):
         uri = '/api/v2/ping'
         request = self.request_handler.make_request(uri=uri,
                                                     request_type='GET',
-                                                    output_format=output_format)
+                                                    return_response=return_response,
+                                                    output_format=output_format,
+                                                    raise_errors=False)
         return request
 
     def get_full_users_list(self):
@@ -600,8 +601,7 @@ class PlexTV(object):
                       'pms_name': helpers.get_xml_attr(device, 'name'),
                       'pms_version': helpers.get_xml_attr(device, 'productVersion'),
                       'pms_platform': helpers.get_xml_attr(device, 'platform'),
-                      'pms_presence': helpers.get_xml_attr(device, 'presence'),
-                      'pms_is_cloud': 1 if helpers.get_xml_attr(device, 'platform') == 'Cloud' else 0
+                      'pms_presence': helpers.get_xml_attr(device, 'presence')
                       }
 
             for c in connections:
@@ -640,6 +640,14 @@ class PlexTV(object):
                     if server.get('connections'):
                         break
 
+        # A token copied from the server's Preferences.xml makes plex.tv store Tautulli's version on the server.
+        # plex.tv echoes the caller's token as an owned server's accessToken, so a token compare cannot detect it.
+        if server.get('pms_version') == common.RELEASE:
+            logger.error("Tautulli PlexTV :: plex.tv lists Plex Media Server '%s' with Tautulli's version %s. "
+                         "The Plex token in Tautulli is probably the server's own token (PlexOnlineToken). "
+                         "Use Settings > Plex Media Server > Fetch New Token to give Tautulli its own token.",
+                         server['pms_name'], common.RELEASE)
+
         return server
 
     def get_server_times(self):
@@ -662,7 +670,7 @@ class PlexTV(object):
 
         return server_times
 
-    def discover(self, include_cloud=True, all_servers=False):
+    def discover(self, all_servers=False):
         """ Query plex for all servers online. Returns the ones you own in a selectize format """
 
         # Try to discover localhost server
@@ -682,7 +690,6 @@ class PlexTV(object):
                         'uri': 'http://127.0.0.1:32400',
                         'local': '1',
                         'value': '127.0.0.1:32400',
-                        'is_cloud': False
                         }
 
         servers = self.get_plextv_resources(include_https=True, output_format='xml')
@@ -707,10 +714,6 @@ class PlexTV(object):
                             helpers.get_xml_attr(d, 'owned') == '1' and \
                             helpers.get_xml_attr(d, 'provides') == 'server':
 
-                        is_cloud = (helpers.get_xml_attr(d, 'platform').lower() == 'cloud')
-                        if not include_cloud and is_cloud:
-                            continue
-
                         connections = d.getElementsByTagName('Connection')
 
                         for c in connections:
@@ -731,7 +734,7 @@ class PlexTV(object):
                                 clean_servers.append(local_server)
                                 local_machine_identifier = None
 
-                            server = {'httpsRequired': '1' if is_cloud else helpers.get_xml_attr(d, 'httpsRequired'),
+                            server = {'httpsRequired': helpers.get_xml_attr(d, 'httpsRequired'),
                                       'clientIdentifier': helpers.get_xml_attr(d, 'clientIdentifier'),
                                       'label': helpers.get_xml_attr(d, 'name'),
                                       'ip': helpers.get_xml_attr(c, 'address'),
@@ -739,7 +742,6 @@ class PlexTV(object):
                                       'uri': helpers.get_xml_attr(c, 'uri'),
                                       'local': helpers.get_xml_attr(c, 'local'),
                                       'value': helpers.get_xml_attr(c, 'address') + ':' + helpers.get_xml_attr(c, 'port'),
-                                      'is_cloud': is_cloud
                                       }
                             clean_servers.append(server)
 
@@ -826,13 +828,9 @@ class PlexTV(object):
             return False
 
         if subscription and helpers.get_xml_attr(subscription[0], 'active') == '1':
-            plexpy.CONFIG.__setattr__('PMS_PLEXPASS', 1)
-            plexpy.CONFIG.write()
             return True
         else:
             logger.debug("Tautulli PlexTV :: Plex Pass subscription not found.")
-            plexpy.CONFIG.__setattr__('PMS_PLEXPASS', 0)
-            plexpy.CONFIG.write()
             return False
 
     def get_devices_list(self):
@@ -862,24 +860,6 @@ class PlexTV(object):
             devices_list.append(device)
 
         return devices_list
-
-    def get_cloud_server_status(self):
-        cloud_status = self.cloud_server_status(output_format='xml')
-
-        try:
-            status_info = cloud_status.getElementsByTagName('info')
-        except Exception as e:
-            logger.warn("Tautulli PlexTV :: Unable to parse XML for get_cloud_server_status: %s." % e)
-            return False
-
-        for info in status_info:
-            servers = info.getElementsByTagName('server')
-            for s in servers:
-                if helpers.get_xml_attr(s, 'address') == plexpy.CONFIG.PMS_IP:
-                    if helpers.get_xml_attr(info, 'running') == '1':
-                        return True
-                    else:
-                        return False
 
     def get_plex_account_details(self):
         account_data = self.get_plextv_user_details(output_format='xml')
@@ -952,3 +932,11 @@ class PlexTV(object):
         if xml_head:
             return helpers.bool_true(xml_head[0].firstChild.nodeValue)
         return False
+
+    def check_token(self):
+        response = self.ping_plextv(return_response=True)
+        if response is not None:
+            if response.status_code == 401:
+                return False
+            if 200 <= response.status_code < 300:
+                return True

@@ -1,14 +1,10 @@
+import calendar
+import datetime
 import logging
 import os
 import time
-import datetime
-import calendar
 import warnings
-
-try:
-    import zoneinfo  # pragma: no cover
-except ImportError:
-    from backports import zoneinfo  # pragma: no cover
+import zoneinfo
 
 from tzlocal import windows_tz
 
@@ -35,9 +31,9 @@ def assert_tz_offset(tz, error=True):
     # No one has timezone offsets less than a minute, so this should be close enough:
     if abs(tz_offset - system_offset) > 60:
         msg = (
-            "Timezone offset does not match system offset: {} != {}. "
+            f"Timezone offset does not match system offset: {tz_offset} != {system_offset}. "
             "Please, check your config files."
-        ).format(tz_offset, system_offset)
+        )
         if error:
             raise ValueError(msg)
         warnings.warn(msg)
@@ -63,16 +59,11 @@ def _tz_name_from_env(tzenv=None):
         # It's a file specification, expand it, if possible
         parts = os.path.realpath(tzenv).split(os.sep)
 
-        # Is it a zone info zone?
-        possible_tz = "/".join(parts[-2:])
-        if possible_tz in windows_tz.tz_win:
-            # Yup, it is
-            return possible_tz
-
-        # Maybe it's a short one, like UTC?
-        if parts[-1] in windows_tz.tz_win:
-            # Indeed
-            return parts[-1]
+        # Find the full zone name, including names with multiple slashes.
+        for start in range(len(parts)):
+            possible_tz = "/".join(parts[start:])
+            if possible_tz in windows_tz.tz_win:
+                return possible_tz
 
     log.debug("TZ does not contain a time zone name")
     return None
@@ -107,6 +98,6 @@ def _tz_from_env(tzenv=None):
     except zoneinfo.ZoneInfoNotFoundError:
         # Nope, it's something like "PST4DST" etc, we can't handle that.
         raise zoneinfo.ZoneInfoNotFoundError(
-            "tzlocal() does not support non-zoneinfo timezones like %s. \n"
-            "Please use a timezone in the form of Continent/City" % tzenv
+            f"tzlocal() does not support non-zoneinfo timezones like {tzenv}. \n"
+            "Please use a timezone in the form of Continent/City"
         ) from None

@@ -1,5 +1,304 @@
 # Changelog
 
+## v2.19.1 (2026-11-10)
+
+* Other:
+  * Fix: Snap package not starting.
+
+
+## v2.19.0 (2026-11-10)
+
+* Notes:
+  * Support for Python 3.10 has been dropped. The minimum Python version is now 3.11.
+  * Installs without a password set will generate a temporary random password on upgrade. The temporary login info can be found in the Tautulli log file. Please change the password in the settings after logging in.
+* Activity:
+  * Change: Renamed ETA on activity cards to Ends At. (#2574)
+* History:
+  * Fix: Filtering history tables on collections and playlist media info pages showed incorrect results.
+  * New: Added feature to archive users and libraries while keeping their history. (#1435, #2778) (Thanks @akonopcz)
+    * Note: Archived users and libraries are excluded from all history and statistics by default. They can be shown using the "Show Archived Data" button in the navigation bar dropdown menu.
+  * New: Added ability to restore deleted users/libraries from the users/libraries tables in edit mode.
+* Notifications:
+  * Fix: Telegram notifications shown as failed in the notification logs when a poster with a caption is sent. (#2852) (Thanks @PilaScat)
+  * Fix: Dolby Vision Profile and Level notification parameters should be blank when not present. (#2381)
+  * Fix: Deep links for Plex Android / iOS app notifications not working.
+  * New: Added Ace editor for editing notification text.
+  * New: Added live TV notification exclusion tag.
+  * New: Added Letterboxd URL notification parameter. (#1904)
+  * New: Added Reply-To header to email notification agent. (#1702)
+  * Removed: OneSignal notifications for Tautulli Remote App.
+* Newsletters:
+  * Fix: Unable to save blank newsletter subject, body, or message.
+  * New: Added weeks and years time frame options for newsletters. (#2042)
+  * New: Added item counts to recently added newsletter parameters. (#1787)
+  * Fix: Do not allow custom newsletter templates inside the newsletter output folder. (Thanks @SHAHID-XT)
+  * Fix: Newsletter scheduler crash when local timezone cannot be resolved. (#2889, #2890)
+* Exporter:
+  * Fix: Truncate long titles in export filenames. (#2777)
+* UI:
+  * Fix: Collections composite poster not showing on media info pages.
+  * Fix: Broken collections click through link to Plex Web on media info pages.
+  * Fix: Alert message for an expired Plex token not showing up.
+  * Fix: Escape playlist titles in the Playlist tables. (CVE-2026-TBD) (Thanks @Cbdlll)
+  * Fix: Escape media info fields in the Media Info tables. (CVE-2026-TBD) (Thanks @Cbdlll)
+  * Fix: Escape subtitle language on the activity cards. (CVE-2026-TBD) (Thanks @Cbdlll)
+  * New: Various UI fixes and improvements.
+  * New: Allow selecting multiple media types for recently added on the homepage. (#2733)
+  * New: Added ability to disable Tautulli login and only allow Plex OAuth login. (#2092)
+* API:
+  * New: Added include_archived parameter to all history and statistics API commands.
+  * New: Added user_is_archived and library_is_archived to get_history API response.
+  * New: Added deleted_user and is_archived to get_users_table API response.
+  * New: Added deleted_section and is_archived to get_libraries_table API response.
+  * New: Added is_archived to get_user, get_users, get_user_names, get_library, and get_library_names API responses.
+  * New: Added row_ids parameter to undelete_user and undelete_library API commands.
+  * New: Added include_last_triggered parameter to get_notifiers API command.
+  * New: get_recently_added API command now accepts a comma separated list of media types.
+* Other:
+  * Fix: Some default settings were reset to disabled after completing the setup wizard.
+  * Fix: SSRF in /pms_image_proxy via unrestricted external image URL handling. (CVE-2026-TBD) (Thanks @larlarua)
+  * Fix: CSRF via State-Changing GET Endpoints Allows Administrative Actions. (CVE-2026-TBD) (Thanks @zaara2004)
+  * Fix: Generating self-signed SSL certificates not working.
+  * Fix: Changing admin HTTP password did not log out existing sessions. (#2868) (Thanks @spjoes)
+  * Fix: GIT_PATH command injection. (@SHAHID-XT)
+  * New: Major database optimizations and performance improvements.
+  * New: Added Homebrew Cask installation method for macOS. (#2867) (Thanks @manakbisht)
+  * New: Added Flatpak installation method for Linux.
+  * New: Added CPU architecture to the system analytics data.
+  * New: Update Docker image, and Windows and MacOS packages to Python 3.14.
+  * New: Improved Tautulli log messages to include full traceback for errors. (#2760)
+  * New: Refuse non-local clients when no password is set. This can be disabled by setting allow_public_no_password = 1 in the config file.
+  * New: Log IP address of failed login attempts. (#2092)
+  * New: Generate a temporary random login password on new installs to access the setup wizard. (CVE-2026-TBD) (Thanks @SHAHID-XT)
+  * New: Generate a temporary random login password on existing installs if no password is set.
+  * Change: Only allow X-Api-Key header for `/api` and `/auth/signin`.
+  * Removed: Drop support for arm/v6 Docker image.
+  * Removed: Drop support for macOS 10.13 and 10.14 for the Intel x86_64 installer package.
+  * Removed: /delete_duplicate_libraries endpoint removed.
+  * Removed: PlexWatch and Plexivity importers removed.
+
+
+## v2.18.2 (2026-09-28)
+
+* Activity:
+  * Fix: IPv6 address overlapping the ETA on activity cards.
+  * Fix: Live channel name overflowing the activity card.
+* History:
+  * Fix: Require matching guid when grouping non-live history. (#2768, #2769) (Thanks @vefilippo)
+  * Fix: Regrouping history splitting live TV.
+  * Fix: Regrouping history based on previous durations and markers.
+    * Note: Regrouping existing history will use the new logic and split history based on guid.
+* Notifications:
+  * Fix: Recently added notifications crashing if the item is removed from Plex before the notification is sent. (#2751) (Thanks @TowyTowy)
+  * Fix: Paused notifications sending repeatedly when a stream is buffering.
+  * New: Allow "undisclosed-recipients:;" in Email/newsletter to field. (#2763, #2837) (Thanks @thePFLy)
+  * New: Include season, episode, and track ranges in grouped titles for rich metadata cards. (#2835, #2836) (Thanks @herikwebb)
+* Newsletters:
+  * Fix: Path traversal in newsletter filename. (Thanks @router0mail)
+  * New: Added edition_title to newsletter JSON data. (#2840)
+* Exporter:
+  * New: Added loudness normalization info to export fields for movie and episode audio streams.
+* UI:
+  * Fix: Prevent caching of server-rendered HTML templates. (#2810, #2811)
+  * Fix: Dashboard stats card overflow/clipping on Firefox 155.0. (#2821)
+  * New: Added X-Frame-Options header to settings page.
+  * New: Make links inside table cells easier to target. (#2754) (Thanks @stephenp)
+* API:
+  * Fix: logout_user_session API command returning error even on success.
+  * New: Added edition_title to get_recently_added API command response.
+* Other:
+  * Fix: Database backups failing if backup directory is a network share. (#2824)
+  * Fix: Imported databases not being optimized.
+  * New: Added option to disable creating a desktop shortcut in Windows installer.
+  * New: Added /NOLAUNCH Windows installer flag to skip launching Tautulli after installer is complete. (#2234)
+  * New: Added /NOBROWSER Windows installer flag to skip opening the browser after installer is complete.
+
+
+## v2.18.1 (2026-08-26)
+
+* Activity:
+  * Fix: Empty sessions row being added into the database.
+* History:
+  * Fix: Unable to expand detailed history when "Current Activity in History Tables" setting is enabled. (#2805)
+* Notifications:
+  * Fix: Email password being overwritten with a blank value when saving email notification settings. (#2804)
+  * Fix: New device notification retriggering for Local user. (#2795)
+  * Fix: Sentinel values appearing in notification text enclosed in backticks. (#2794)
+* Other:
+  * New: Added X-Frame-Options header to config file. (#2807)
+* API:
+  * Fix: Guest users being able to retrieve history of another user through the API.
+  * Change: Revert double nested data in get_plex_logs API command response. (#2806)
+
+
+## v2.18.0 (2026-08-25)
+
+* Activity:
+  * Fix: Displaying 4K resolution on activity cards.
+  * New: Added Dolby Atmos to activity cards.
+* Notifications:
+  * New: Added Dolby Atmos notification parameters.
+  * New: Support for Tautulli Remote App notifications sent using a push relay instead of OneSignal. OneSignal notifications will be deprecated on Oct. 1, 2026. (#2772)
+* Exporter:
+  * New: Added editionTitle to export fields for shows, seasons, and episodes.
+* History:
+  * Fix: Double history table refresh on page load.
+  * Fix: Paginate datatables queries in SQL instead of Python. (#2728) (Thanks @stephenp)
+  * Fix: Various database optimizations to improve performance of history queries.
+* UI:
+  * Fix: Unable to edit users or libraries from the tables.
+  * Fix: Dashboard stats card overflow/clipping on Firefox 153.0.3. (#2776, #2787) (Thanks @maldis018)
+  * New: Added button to delete/restore users and libraries from the user/library profile pages.
+  * New: Added toggle for anonymous system analytics to the setup wizard and settings page. (#2781)
+* Other:
+  * Fix: Improve Plex log file parsing.
+  * Fix: Path traversal in update tarfile extraction. (Thanks @tonghuaroot)
+  * Fix: Plex token leakage in case-sensitive URL bypass in pms_image_proxy. (Thanks @Xiaoyiyi23)
+  * New: Build separate MacOS arm64 and x86_64 packages for Apple silicon and Intel Macs.
+  * New: Added security headers to cherrypy response headers.
+* API:
+  * Fix: get_home_stats API command before and after parameters not working.
+  * Fix: get_export_fields API command sub_media_type parameter not working.
+  * Fix: search API command limit parameter not being applied.
+  * Fix: delete_hosted_images API command return correct error response.
+  * Fix: notify API command notify_action parameter clobbering if provided.
+  * Fix: set_newsletter_config API command optional parameters subject/body/message.
+  * Fix: download_plex_log and get_plex_log API commands return correct error response.
+  * Fix: logout_user_session API command return correct error response when no row_id provided.
+  * Fix: get_logs API command search/regex/sort before slicing.
+  * Fix: get_recently_added API command response contained a blank section_id.
+  * Fix: get_metadata API command return error for invalid rating_key provided.
+  * Fix: sql API command making database backups on every query.
+  * Fix: API commands not returning correct 400 error response.
+  * New: Added Dolby Atmos info to the get_activity and get_metadata API command.
+  * New: Allow X-Api-Key header to be used instead of the API key parameter.
+  * New: Add API response to CORS preflight OPTIONS.
+  * Change: edit_user and edit_library API commands to only update provided parameters.
+  * Change: set_notifier_config and set_newsletter_config API commands to only update provided parameters.
+  * Change: Double nested data in get_plex_logs API command response.
+  * Removed: Deprecated delete_synced_item API command.
+
+
+## v2.17.2 (2026-06-16)
+
+* Notifications:
+  * Fix: Line breaks in Gotify notification body text. (#2702)
+* Newsletters:
+  * Fix: XSS in newsletter cron value. (CVE-2026-49995) (Thanks @elvinsuleymanov)
+* UI:
+  * Fix: Reflected XSS in search query string. (CVE-2026-45381) (Thanks @JakePeralta7, @sondt99, @kah-ja)
+  * Fix: Duplicated activity card progress timers. (#2716) (Thanks @omglazrgunpewpew)
+* Other:
+  * Fix: Fix X-Api-Key header check crashing server. (#2711)
+  * Fix: Path traversal in uploaded database and config file names. (CVE-2026-52835) (Thanks @tonghuaroot)
+  * Fix: Empty host fallback in URL when launching browser. (#2722) (Thanks @upmcplanetracker)
+  * Fix: Open redirect via whitespace bypass in /auth/redirect (CVE-2026-54915) (Thanks @sondt99)
+
+
+## v2.17.1 (2026-05-04)
+
+* Notifications:
+  * Fix: Tautulli Remote App notifications failing to send. (#2669)
+  * New: Added extra type and preroll to notification parameters.
+  * New: Added Simkl URL to notification parameters.
+* Newsletters:
+  * Fix: Remote code execution via newsletter custom template directory. (CVE-2026-41065) (Thanks @remindsec)
+* Exporter:
+  * Fix: Export failed when logo / square art keys were included. (#2685)
+* UI:
+  * Fix: Error when browsing for folder paths. (#2673)
+  * New: Added AV1 media flag image. (#2676) (Thanks @little0831)
+  * New: Added opus media flag image.
+* Other:
+  * Fix: Clean empty directories after updating using git. (#2667)
+  * Fix: Tautulli failing to reconnect to Plex Media Server until restarted after a connection loss at startup. (#2640)
+  * Fix: Path treversal in cache deletion API. (CVE-2026-40605) (Thanks @JakePeralta7)
+  * Fix: Websocket not exiting and reconnecting cleanly after changing Plex servers.
+  * Fix: Sanitize JS log errors to prevent XSS. (CVE-2026-43984) (Thanks @larlarua)
+  * Fix: Do not store image hash for external images. (CVE-2026-43986) (Thanks @larlarua)
+  * New: Update Windows and MacOS packages to Python 3.13.
+  * New: Update Snap package to core24.
+  * New: Using mounted folders for custom newsletter templates and scripts requires manually enabling allow_mounted_folders = 1 in the config file.
+  * New: Added anti-CSRF tokens and enforce POST methods to state change endpoints. (CVE-2026-43985) (Thanks @larlarua)
+  * New: Hash Tautulli cookie name. All existing login sessions will be invalidated after the update.
+  * New: Require X-Api-Key header for login through the /auth/signin endpoint.
+
+
+## v2.17.0 (2026-03-27)
+
+* Important Note!
+  * Several security vulnerabilities have been identified in Tautulli versions <=2.16.1. Users are strongly encouraged to update to the latest Tautulli version 2.17.x.
+* Notifications:
+  * Fix: Prevent RCE in notification text evaluation. (CVE-2026-28505) (Thanks @q1uf3ng)
+* Newsletters:
+  * Fix: Media from other video libraries using the modern Plex agents not showing up on newsletter.
+  * Fix: Unauthenticated path traversal in /newsletter/image/images endpoint. (CVE-2026-31831) (Thanks @JakePeralta7)
+* Exporter:
+  * Fix: Logo images incorrectly exported as jpg instead of png.
+  * New: Added ability to export square art images.
+  * New: Added ability to export theme music. (#2654)
+* Graphs:
+  * Fix: History modal not opening when clicking on graphs. (#2652)
+* API:
+  * Fix: SQL injection in get_home_stats API command. (CVE-2026-31799) (Thanks @mandreko)
+  * Fix: Unsanitized JSONP callback parameter. (CVE-2026-32275) (Thanks @mandreko)
+  * New: Added rating to get_home_stats API command. (#2655) (Thanks @jma1ice)
+  * Removed: get_apikey API command.
+* Other:
+  * Fix: Validate log path for Plex log files. (#2632)
+  * Fix: Add authentication to /pms_image_proxy endpoint. (CVE-2026-31804) (Thanks @mandreko)
+  * New: Updated third party donation logos. (#2646) (Thanks @aisgbnok)
+  * New: Update Bootstrap CSS to v3.4.1 and decouple overrides. (#2662) (Thanks @aisgbnok)
+  * New: Update Bootstrap-select to v1.13.18. (#2666) (Thanks @aisgbnok)
+
+
+## v2.16.1 (2026-12-15)
+
+* Notifications:
+  * New: Add Tautulli Plex token expired notification trigger.
+* Newsletters:
+  * New: Add Ace editor for syntax highlighting and code formatting for newsletter message text (#2585) (Thanks @mcclown)
+* Graphs:
+  * Change: Restrict graphs to guest user.
+* UI:
+  * New: Add DD:HH:MM time format for home stats.
+  * New: Add HH:MM:SS time format for activity cards.
+  * Removed: Timezone from IP address modal.
+* Other:
+  * Change: Zip backup files to reduce file size.
+
+
+## v2.16.0 (2025-09-08)
+
+* Important Note!
+  * Several security vulnerabilities have been identified in Tautulli versions <=2.15.3. Users are strongly encouraged to update to the latest Tautulli version 2.16.x.
+* UI:
+  * Fix: Update poster click-through overlay to new Plex logo. (#2584) (Thanks @TheMeanCanEHdian)
+* Other:
+  * Fix: Race condition in image cache directory creation. (#2580) (Thanks @keithah)
+  * Fix: Validate image path in /image endpoints. (CVE-2025-58760) (Thanks @d-xuan)
+  * Fix: Validate image path in /pms_image_proxy endpoints. (CVE-2025-58761) (Thanks @d-xuan)
+  * Fix: Validate image format in /pms_image_proxy endpoint. (CVE-2025-58762) (Thanks @d-xuan)
+  * Fix: Don't run git command with shell. (CVE-2025-58763) (Thanks @d-xuan)
+
+
+## v2.15.3 (2025-08-03)
+
+* Exporter:
+  * New: Added hearingImpaired for subtitles and visualImpaired for audio attributes to exporter fields.
+* Graphs:
+  * Fix: Remove duplicate "Total" entry in graph tooltips. (Thanks @zdimension) (#2534)
+* UI:
+  * Fix: Failing to retrieve collections / playlists with over 1000 items.
+  * Fix: Scrollbar not showing on macosx and webkit browsers. (#2221)
+  * Fix: Incorrect rounding of minutes in global stats play duration.
+  * Fix: Disable browser autocomplete for notification agent and newsletter agent configurations. (#2557)
+* API:
+  * New: Added ability to return svg files using pms_image_proxy API command.
+* Other:
+  * New: Added ability to set config values using environment variables. (Thanks @komuw) (#2309, #2543)
+
+
 ## v2.15.2 (2025-04-12)
 
 * Activity:

@@ -6,13 +6,10 @@ try:
 except ImportError:
     import winreg
 
-try:
-    import zoneinfo  # pragma: no cover
-except ImportError:
-    from backports import zoneinfo  # pragma: no cover
+import zoneinfo
 
-from tzlocal.windows_tz import win_tz
 from tzlocal import utils
+from tzlocal.windows_tz import win_tz
 
 _cache_tz = None
 _cache_tz_name = None
@@ -89,7 +86,7 @@ def _get_localzone_name():
         # instead return Etc/GMT+offset
 
         tz = zoneinfo.ZoneInfo(timezone)
-        has_dst, std_offset, dst_offset = _get_dst_info(tz)
+        has_dst, std_offset, _dst_offset = _get_dst_info(tz)
         if not has_dst:
             # The DST is turned off in the windows configuration,
             # but this timezone doesn't have DST so it doesn't matter
@@ -107,12 +104,12 @@ def _get_localzone_name():
             )
 
         # This has whole hours as offset, return it as Etc/GMT
-        return f"Etc/GMT{-std_offset//3600:+.0f}"
+        return f"Etc/GMT{-std_offset // 3600:+.0f}"
 
     return timezone
 
 
-def get_localzone_name():
+def get_localzone_name() -> str:
     """Get the zoneinfo timezone name that matches the Windows-configured timezone."""
     global _cache_tz_name
     if _cache_tz_name is None:
@@ -121,7 +118,7 @@ def get_localzone_name():
     return _cache_tz_name
 
 
-def get_localzone():
+def get_localzone() -> zoneinfo.ZoneInfo:
     """Returns the zoneinfo-based tzinfo object that matches the Windows-configured timezone."""
 
     global _cache_tz
@@ -137,7 +134,7 @@ def get_localzone():
     return _cache_tz
 
 
-def reload_localzone():
+def reload_localzone() -> zoneinfo.ZoneInfo:
     """Reload the cached localzone. You need to call this if the timezone has changed."""
     global _cache_tz
     global _cache_tz_name

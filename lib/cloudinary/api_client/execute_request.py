@@ -7,24 +7,32 @@ from urllib3.exceptions import HTTPError
 
 import cloudinary
 from cloudinary.exceptions import (
+    Error,
     BadRequest,
     AuthorizationRequired,
     NotAllowed,
     NotFound,
+    NotAcceptable,
     AlreadyExists,
+    Locked,
     RateLimited,
     GeneralError
 )
-from cloudinary.utils import process_params, safe_cast, smart_escape, unquote
+from cloudinary.utils import process_params, safe_cast, smart_escape, unquote, normalize_params, urlencode, \
+    bracketize_seq
 
 EXCEPTION_CODES = {
     400: BadRequest,
     401: AuthorizationRequired,
     403: NotAllowed,
     404: NotFound,
+    406: NotAcceptable,
     409: AlreadyExists,
     420: RateLimited,
-    500: GeneralError
+    423: Locked,
+    429: RateLimited,
+    500: GeneralError,
+    503: GeneralError
 }
 
 
@@ -36,17 +44,18 @@ class Response(dict):
         self.rate_limit_allowed = safe_cast(response.headers.get("x-featureratelimit-limit"), int)
         self.rate_limit_reset_at = safe_cast(response.headers.get("x-featureratelimit-reset"), email.utils.parsedate)
         self.rate_limit_remaining = safe_cast(response.headers.get("x-featureratelimit-remaining"), int)
+        self.request_id = response.headers.get("x-request-id")
 
 
 def execute_request(http_connector, method, params, headers, auth, api_url, **options):
-    # authentication
+    anonymous = auth.get("anonymous")
     key = auth.get("key")
     secret = auth.get("secret")
     oauth_token = auth.get("oauth_token")
-    req_headers = urllib3.make_headers(
-        user_agent=cloudinary.get_user_agent()
-    )
-    if oauth_token:
+    req_headers = urllib3.make_headers(user_agent=cloudinary.get_user_agent())
+    if anonymous:
+        pass
+    elif oauth_token:
         req_headers["authorization"] = "Bearer {}".format(oauth_token)
     else:
         req_headers.update(urllib3.make_headers(basic_auth="{0}:{1}".format(key, secret)))
@@ -54,15 +63,22 @@ def execute_request(http_connector, method, params, headers, auth, api_url, **op
     if headers is not None:
         req_headers.update(headers)
 
+    api_url = smart_escape(unquote(api_url))
     kw = {}
-    if "timeout" in options:
-        kw["timeout"] = options["timeout"]
+    timeout = options.get("timeout", cloudinary.config().timeout)
+    if timeout is not None:
+        kw["timeout"] = timeout
     if "body" in options:
         kw["body"] = options["body"]
 
-    processed_params = process_params(params)
+    if method.upper() == "GET":
+        query_string = urlencode(bracketize_seq(params), True)
+        if query_string:
+            api_url += "?" + query_string
+        processed_params = None
+    else:
+        processed_params = process_params(params)
 
-    api_url = smart_escape(unquote(api_url))
     try:
         response = http_connector.request(method=method.upper(), url=api_url, fields=processed_params, headers=req_headers, **kw)
         body = response.data
@@ -77,9 +93,11 @@ def execute_request(http_connector, method, params, headers, auth, api_url, **op
         # Error is parsing json
         raise GeneralError("Error parsing server response (%d) - %s. Got - %s" % (response.status, body, e))
 
+    if response.status >= 400 and "error" not in result and "message" in result:
+        result = {"error": {"message": result["message"]}}
+
     if "error" in result:
-        exception_class = EXCEPTION_CODES.get(response.status) or Exception
-        exception_class = exception_class
+        exception_class = EXCEPTION_CODES.get(response.status) or Error
         raise exception_class("Error {0} - {1}".format(response.status, result["error"]["message"]))
 
     return Response(result, response)

@@ -1,8 +1,7 @@
-# -*- coding: utf-8 -*-
 from urllib.parse import quote_plus
 
 from plexapi import utils
-from plexapi.base import PlexObject
+from plexapi.base import PlexObject, cached_data_property
 from plexapi.exceptions import BadRequest
 
 
@@ -36,7 +35,7 @@ class PlayQueue(PlexObject):
     TYPE = "playqueue"
 
     def _loadData(self, data):
-        self._data = data
+        """ Load attribute values from Plex XML response. """
         self.identifier = data.attrib.get("identifier")
         self.mediaTagPrefix = data.attrib.get("mediaTagPrefix")
         self.mediaTagVersion = utils.cast(int, data.attrib.get("mediaTagVersion"))
@@ -62,8 +61,11 @@ class PlayQueue(PlexObject):
         )
         self.playQueueVersion = utils.cast(int, data.attrib.get("playQueueVersion"))
         self.size = utils.cast(int, data.attrib.get("size", 0))
-        self.items = self.findItems(data)
         self.selectedItem = self[self.playQueueSelectedItemOffset]
+
+    @cached_data_property
+    def items(self):
+        return self.findItems(self._data)
 
     def __getitem__(self, key):
         if not self.items:
@@ -134,39 +136,25 @@ class PlayQueue(PlexObject):
         c._server = server
         return c
 
-    @classmethod
-    def create(
-        cls,
+    @staticmethod
+    def _createArgs(
         server,
         items,
         startItem=None,
-        shuffle=0,
-        repeat=0,
-        includeChapters=1,
-        includeRelated=1,
-        continuous=0,
+        shuffle=False,
+        repeat=False,
+        includeChapters=True,
+        includeRelated=True,
+        continuous=False,
+        **kwargs
     ):
-        """Create and return a new :class:`~plexapi.playqueue.PlayQueue`.
-
-        Parameters:
-            server (:class:`~plexapi.server.PlexServer`): Server you are connected to.
-            items (:class:`~plexapi.base.PlexPartialObject`):
-                A media item or a list of media items.
-            startItem (:class:`~plexapi.base.Playable`, optional):
-                Media item in the PlayQueue where playback should begin.
-            shuffle (int, optional): Start the playqueue shuffled.
-            repeat (int, optional): Start the playqueue shuffled.
-            includeChapters (int, optional): include Chapters.
-            includeRelated (int, optional): include Related.
-            continuous (int, optional): include additional items after the initial item.
-                For a show this would be the next episodes, for a movie it does nothing.
-        """
         args = {
-            "includeChapters": includeChapters,
-            "includeRelated": includeRelated,
-            "repeat": repeat,
-            "shuffle": shuffle,
-            "continuous": continuous,
+            "includeChapters": int(bool(includeChapters)),
+            "includeRelated": int(bool(includeRelated)),
+            "repeat": int(bool(repeat)),
+            "shuffle": int(bool(shuffle)),
+            "continuous": int(bool(continuous)),
+            **kwargs
         }
 
         if isinstance(items, list):
@@ -185,6 +173,48 @@ class PlayQueue(PlexObject):
         if startItem:
             args["key"] = startItem.key
 
+        return args
+
+    @classmethod
+    def create(
+        cls,
+        server,
+        items,
+        startItem=None,
+        shuffle=False,
+        repeat=False,
+        includeChapters=True,
+        includeRelated=True,
+        continuous=False,
+        **kwargs
+    ):
+        """Create and return a new :class:`~plexapi.playqueue.PlayQueue`.
+
+        Parameters:
+            server (:class:`~plexapi.server.PlexServer`): Server you are connected to.
+            items (:class:`~plexapi.base.PlexPartialObject`):
+                A media item or a list of media items.
+            startItem (:class:`~plexapi.base.Playable`, optional):
+                Media item in the PlayQueue where playback should begin.
+            shuffle (bool, optional): Start the playqueue shuffled.
+            repeat (bool, optional): Start the playqueue shuffled.
+            includeChapters (bool, optional): include Chapters.
+            includeRelated (bool, optional): include Related.
+            continuous (bool, optional): include additional items after the initial item.
+                For a show this would be the next episodes, for a movie it does nothing.
+            **kwargs (dict): Additional options to apply to the playqueue.
+        """
+        args = cls._createArgs(
+            server=server,
+            items=items,
+            startItem=startItem,
+            shuffle=shuffle,
+            repeat=repeat,
+            includeChapters=includeChapters,
+            includeRelated=includeRelated,
+            continuous=continuous,
+            **kwargs
+        )
         path = f"/playQueues{utils.joinArgs(args)}"
         data = server.query(path, method=server._session.post)
         c = cls(server, data, initpath=path)
@@ -254,7 +284,7 @@ class PlayQueue(PlexObject):
 
         path = f"/playQueues/{self.playQueueID}{utils.joinArgs(args)}"
         data = self._server.query(path, method=self._server._session.put)
-        self._loadData(data)
+        self._invalidateCacheAndLoadData(data)
         return self
 
     def moveItem(self, item, after=None, refresh=True):
@@ -283,7 +313,7 @@ class PlayQueue(PlexObject):
 
         path = f"/playQueues/{self.playQueueID}/items/{item.playQueueItemID}/move{utils.joinArgs(args)}"
         data = self._server.query(path, method=self._server._session.put)
-        self._loadData(data)
+        self._invalidateCacheAndLoadData(data)
         return self
 
     def removeItem(self, item, refresh=True):
@@ -301,19 +331,19 @@ class PlayQueue(PlexObject):
 
         path = f"/playQueues/{self.playQueueID}/items/{item.playQueueItemID}"
         data = self._server.query(path, method=self._server._session.delete)
-        self._loadData(data)
+        self._invalidateCacheAndLoadData(data)
         return self
 
     def clear(self):
         """Remove all items from the PlayQueue."""
         path = f"/playQueues/{self.playQueueID}/items"
         data = self._server.query(path, method=self._server._session.delete)
-        self._loadData(data)
+        self._invalidateCacheAndLoadData(data)
         return self
 
     def refresh(self):
         """Refresh the PlayQueue from the Plex server."""
         path = f"/playQueues/{self.playQueueID}"
         data = self._server.query(path, method=self._server._session.get)
-        self._loadData(data)
+        self._invalidateCacheAndLoadData(data)
         return self

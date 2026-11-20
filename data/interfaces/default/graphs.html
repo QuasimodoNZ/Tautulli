@@ -13,13 +13,15 @@
             <span><i class="fa fa-bar-chart"></i> Graphs</span>
         </div>
         <div class="button-bar">
+            % if _session['user_group'] == 'admin':
             <div class="btn-group" id="user-selection">
                 <label>
                     <select name="graph-user" id="graph-user" multiple>
                     </select>
                 </label>
             </div>
-            <div class="btn-group" style="margin-right: 2px;" data-toggle="buttons" id="yaxis-selection">
+            % endif
+            <div class="btn-group" data-toggle="buttons" id="yaxis-selection">
                 <label class="btn btn-dark btn-filter">
                     <input type="radio" name="yaxis-options" id="yaxis-plays" value="plays" autocomplete="off"> Play Count
                 </label>
@@ -27,16 +29,18 @@
                     <input type="radio" name="yaxis-options" id="yaxis-duration" value="duration" autocomplete="off"> Play Duration
                 </label>
             </div>
-            <div class="input-group pull-right" style="width: 1px;" id="days-selection">
-                <span class="input-group-addon btn-dark inactive">Last</span>
-                <input type="number" class="form-control number-input" name="graph-days" id="graph-days" value="30" min="1" data-default="7" data-toggle="tooltip" title="Min: 1 day" />
-                <span class="input-group-addon btn-dark inactive">days</span>
+            <div class="btn-group">
+                <div class="input-group" style="width: 1px;" id="days-selection">
+                    <span class="input-group-addon btn-dark inactive">Last</span>
+                    <input type="number" class="form-control number-input" name="graph-days" id="graph-days" value="30" min="1" data-default="7" data-toggle="tooltip" title="Min: 1 day" />
+                    <span class="input-group-addon btn-dark inactive">days</span>
+                </div>
+                <div class="input-group" style="width: 1px; display: none;" id="months-selection">
+                    <span class="input-group-addon btn-dark inactive">Last</span>
+                    <input type="number" class="form-control number-input" name="graph-months" id="graph-months" value="12" min="1" data-default="12" data-toggle="tooltip" title="Min: 1 month" />
+                    <span class="input-group-addon btn-dark inactive">months</span>
+			    </div>
             </div>
-            <div class="input-group pull-right" style="width: 1px;" id="months-selection">
-                <span class="input-group-addon btn-dark inactive">Last</span>
-                <input type="number" class="form-control number-input" name="graph-months" id="graph-months" value="12" min="1" data-default="12" data-toggle="tooltip" title="Min: 1 month" />
-                <span class="input-group-addon btn-dark inactive">months</span>
-			</div>
         </div>
     </div>
     <div class="table-card-back">
@@ -245,7 +249,7 @@
 <script src="${http_root}js/dataTables.bootstrap.pagination.js"></script>
 
 <script>
-    var selected_user_id = null;
+    var selected_user_id = "${_session['user_group']}" == "admin" ? null : "${_session['user_id']}";
 
     // Modal popup dialog
     function selectHandler(selectedDate, selectedSeries) {
@@ -278,7 +282,8 @@
                     user_id: selected_user_id,
                     start_date: dateString,
                     media_type: media_type,
-                    transcode_decision: transcode_decision
+                    transcode_decision: transcode_decision,
+                    include_archived: include_archived
                 },
                 complete: function(xhr, status) {
                     $("#history-modal").html(xhr.responseText);
@@ -355,7 +360,6 @@
 <script src="${http_root}js/graphs/plays_by_month.js${cache_param}"></script>
 <script>
     $(document).ready(function () {
-
         // Initial values for graph from local storage
         var yaxis = getLocalStorage('graph_type', 'plays');
         var current_day_range = getLocalStorage('graph_days', 30);
@@ -392,43 +396,57 @@
         $('.days').text(current_day_range);
         $('.months').text(current_month_range);
         
+        var user_select_initialized = false;
+        var user_names_by_id = {};
+
         // Load user ids and names (for the selector)
-        $.ajax({
-            url: 'get_user_names',
-            type: 'get',
-            dataType: "json",
-            success: function (data) {
-                let select = $('#graph-user');
-                let by_id = {};
-                data.sort(function(a, b) {
-                    return a.friendly_name.localeCompare(b.friendly_name);
-                });
-                data.forEach(function(item) {
-                    select.append('<option value="' + item.user_id + '">' +
-                        item.friendly_name + '</option>');
-                    by_id[item.user_id] = item.friendly_name;
-                });
-                select.selectpicker({
-                    countSelectedText: function(sel, total) {
-                        if (sel === 0 || sel === total) {
-                            return 'All users';
-                        } else if (sel > 1) {
-                            return sel + ' users';
-                        } else {
-                            return select.val().map(function(id) {
-                                return by_id[id];
-                            }).join(', ');
-                        }
-                    },
-                    style: 'btn-dark',
-                    actionsBox: true,
-                    selectedTextFormat: 'count',
-                    noneSelectedText: 'All users'
-                });
-                select.selectpicker('render');
-                select.selectpicker('selectAll');
-            }
-        });
+        function loadUserNames() {
+            $.ajax({
+                url: 'get_user_names',
+                type: 'GET',
+                data: { include_archived: include_archived },
+                dataType: 'json',
+                success: function (data) {
+                    let select = $('#graph-user');
+                    data.sort(function (a, b) {
+                        return a.friendly_name.localeCompare(b.friendly_name);
+                    });
+                    user_names_by_id = {};
+                    select.empty();
+                    data.forEach(function (item) {
+                        select.append('<option value="' + item.user_id + '">' +
+                            item.friendly_name + '</option>');
+                        user_names_by_id[item.user_id] = item.friendly_name;
+                    });
+                    if (user_select_initialized) {
+                        select.selectpicker('refresh');
+                    } else {
+                        select.selectpicker({
+                            countSelectedText: function(sel, total) {
+                                if (sel === 0 || sel === total) {
+                                    return 'All users';
+                                } else if (sel > 1) {
+                                    return sel + ' users';
+                                } else {
+                                    return select.val().map(function(id) {
+                                        return user_names_by_id[id];
+                                    }).join(', ');
+                                }
+                            },
+                            style: 'btn-dark',
+                            actionsBox: true,
+                            selectedTextFormat: 'count',
+                            noneSelectedText: 'All users'
+                        });
+                        user_select_initialized = true;
+                    }
+                    select.selectpicker('render');
+                    select.selectpicker('selectAll');
+                }
+            });
+        }
+
+        loadUserNames();
 
         function dataSecondsToHours(data) {
             $.each(data.series, function (i, series) {
@@ -447,7 +465,7 @@
             $.ajax({
                 url: "get_plays_by_date",
                 type: 'get',
-                data: { time_range: time_range, y_axis: yaxis, user_id: selected_user_id },
+                data: { time_range: time_range, y_axis: yaxis, user_id: selected_user_id, include_archived: include_archived },
                 dataType: "json",
                 success: function(data) {
                     var dateArray = [];
@@ -475,7 +493,7 @@
             $.ajax({
                 url: "get_plays_by_dayofweek",
                 type: 'get',
-                data: { time_range: time_range, y_axis: yaxis, user_id: selected_user_id },
+                data: { time_range: time_range, y_axis: yaxis, user_id: selected_user_id, include_archived: include_archived },
                 dataType: "json",
                 success: function(data) {
                     if (yaxis === 'duration') { dataSecondsToHours(data); }
@@ -489,7 +507,7 @@
             $.ajax({
                 url: "get_plays_by_hourofday",
                 type: 'get',
-                data: { time_range: time_range, y_axis: yaxis, user_id: selected_user_id },
+                data: { time_range: time_range, y_axis: yaxis, user_id: selected_user_id, include_archived: include_archived },
                 dataType: "json",
                 success: function(data) {
                     if (yaxis === 'duration') { dataSecondsToHours(data); }
@@ -503,7 +521,7 @@
             $.ajax({
                 url: "get_plays_by_top_10_platforms",
                 type: 'get',
-                data: { time_range: time_range, y_axis: yaxis, user_id: selected_user_id },
+                data: { time_range: time_range, y_axis: yaxis, user_id: selected_user_id, include_archived: include_archived },
                 dataType: "json",
                 success: function(data) {
                     if (yaxis === 'duration') { dataSecondsToHours(data); }
@@ -517,7 +535,7 @@
             $.ajax({
                 url: "get_plays_by_top_10_users",
                 type: 'get',
-                data: { time_range: time_range, y_axis: yaxis, user_id: selected_user_id  },
+                data: { time_range: time_range, y_axis: yaxis, user_id: selected_user_id, include_archived: include_archived },
                 dataType: "json",
                 success: function(data) {
                     if (yaxis === 'duration') { dataSecondsToHours(data); }
@@ -540,7 +558,7 @@
             $.ajax({
                 url: "get_plays_by_stream_type",
                 type: 'get',
-                data: { time_range: time_range, y_axis: yaxis, user_id: selected_user_id },
+                data: { time_range: time_range, y_axis: yaxis, user_id: selected_user_id, include_archived: include_archived },
                 dataType: "json",
                 success: function(data) {
                     var dateArray = [];
@@ -568,7 +586,7 @@
             $.ajax({
                 url: "get_concurrent_streams_by_stream_type",
                 type: 'get',
-                data: { time_range: time_range, user_id: selected_user_id },
+                data: { time_range: time_range, user_id: selected_user_id, include_archived: include_archived },
                 dataType: "json",
                 success: function(data) {
                     var dateArray = [];
@@ -595,7 +613,7 @@
             $.ajax({
                 url: "get_plays_by_source_resolution",
                 type: 'get',
-                data: { time_range: time_range, y_axis: yaxis, user_id: selected_user_id },
+                data: { time_range: time_range, y_axis: yaxis, user_id: selected_user_id, include_archived: include_archived },
                 dataType: "json",
                 success: function(data) {
                     if (yaxis === 'duration') { dataSecondsToHours(data); }
@@ -609,7 +627,7 @@
             $.ajax({
                 url: "get_plays_by_stream_resolution",
                 type: 'get',
-                data: { time_range: time_range, y_axis: yaxis, user_id: selected_user_id },
+                data: { time_range: time_range, y_axis: yaxis, user_id: selected_user_id, include_archived: include_archived },
                 dataType: "json",
                 success: function(data) {
                     if (yaxis === 'duration') { dataSecondsToHours(data); }
@@ -623,7 +641,7 @@
             $.ajax({
                 url: "get_stream_type_by_top_10_platforms",
                 type: 'get',
-                data: { time_range: time_range, y_axis: yaxis, user_id: selected_user_id },
+                data: { time_range: time_range, y_axis: yaxis, user_id: selected_user_id, include_archived: include_archived },
                 dataType: "json",
                 success: function(data) {
                     if (yaxis === 'duration') { dataSecondsToHours(data); }
@@ -637,7 +655,7 @@
             $.ajax({
                 url: "get_stream_type_by_top_10_users",
                 type: 'get',
-                data: { time_range: time_range, y_axis: yaxis, user_id: selected_user_id },
+                data: { time_range: time_range, y_axis: yaxis, user_id: selected_user_id, include_archived: include_archived },
                 dataType: "json",
                 success: function(data) {
                     if (yaxis === 'duration') { dataSecondsToHours(data); }
@@ -660,7 +678,7 @@
             $.ajax({
                 url: "get_plays_per_month",
                 type: 'get',
-                data: { time_range: time_range, y_axis: yaxis, user_id: selected_user_id },
+                data: { time_range: time_range, y_axis: yaxis, user_id: selected_user_id, include_archived: include_archived },
                 dataType: "json",
                 success: function(data) {
                     if (yaxis === 'duration') { dataSecondsToHours(data); }
@@ -760,6 +778,7 @@
                     if (this.points.length > 1) {
                         var total = 0;
                         $.each(this.points, function(i, point) {
+                            if (point.series.name === 'Total') return;
                             s += '<br/>'+point.series.name+': '+point.y;
                             total += point.y;
                         });
@@ -786,6 +805,7 @@
                     if (this.points.length > 1) {
                         var total = 0;
                         $.each(this.points, function(i, point) {
+                            if (point.series.name === 'Total') return;
                             s += '<br/>'+point.series.name+': '+moment.duration(point.y, 'hours').format('D [days] H [hrs] m [mins]');
                             total += point.y;
                         });
@@ -835,6 +855,11 @@
             hc_plays_by_month_options.tooltip.formatter = tooltip_format;
             hc_plays_by_month_options.yAxis.stackLabels.formatter = stack_labels_format;
         }
+
+
+        if (current_tab === '#tabs-plays') { loadGraphsTab1(current_day_range, yaxis); }
+        if (current_tab === '#tabs-stream') { loadGraphsTab2(current_day_range, yaxis); }
+        if (current_tab === '#tabs-total') { loadGraphsTab3(current_month_range, yaxis); }
     });
 </script>
 </%def>

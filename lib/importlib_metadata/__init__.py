@@ -22,28 +22,38 @@ import re
 import sys
 import textwrap
 import types
+from collections.abc import Callable, Iterable, Mapping
 from contextlib import suppress
 from importlib import import_module
 from importlib.abc import MetaPathFinder
 from itertools import starmap
-from typing import Any, Iterable, List, Mapping, Match, Optional, Set, cast
+from typing import Any, TypeVar
 
-from . import _meta
 from ._collections import FreezableDefaultDict, Pair
 from ._compat import (
     NullFinder,
     install,
+    localize,
 )
-from ._functools import method_cache, pass_none
+from ._functools import apply, compose, method_cache, noop, pass_none, passthrough
 from ._itertools import always_iterable, bucket, unique_everseen
-from ._meta import PackageMetadata, SimplePath
-from .compat import py39, py311
+from ._meta import (
+    IDistribution,
+    IPackagePath,
+    PackageMetadata,
+    SimplePath,
+)
+from .compat import py311
 
 __all__ = [
     'Distribution',
     'DistributionFinder',
+    'IDistribution',
+    'IPackagePath',
+    'MetadataNotFound',
     'PackageMetadata',
     'PackageNotFoundError',
+    'PackagePath',
     'SimplePath',
     'distribution',
     'distributions',
@@ -56,6 +66,9 @@ __all__ = [
 ]
 
 
+_D = TypeVar('_D', bound=IDistribution)
+
+
 class PackageNotFoundError(ModuleNotFoundError):
     """The package was not found."""
 
@@ -66,6 +79,10 @@ class PackageNotFoundError(ModuleNotFoundError):
     def name(self) -> str:  # type: ignore[override] # make readonly
         (name,) = self.args
         return name
+
+
+class MetadataNotFound(FileNotFoundError):
+    """No metadata file is present in the distribution."""
 
 
 class Sectioned:
@@ -133,6 +150,12 @@ class Sectioned:
         return line and not line.startswith('#')
 
 
+class _EntryPointMatch(types.SimpleNamespace):
+    module: str
+    attr: str
+    extras: str
+
+
 class EntryPoint:
     """An entry point as defined by Python packaging conventions.
 
@@ -148,6 +171,32 @@ class EntryPoint:
     'attr'
     >>> ep.extras
     ['extra1', 'extra2']
+
+    If the value package or module are not valid identifiers, a
+    ValueError is raised on access.
+
+    >>> EntryPoint(name=None, group=None, value='invalid-name').module
+    Traceback (most recent call last):
+    ...
+    ValueError: ('Invalid object reference...invalid-name...
+    >>> EntryPoint(name=None, group=None, value='invalid-name').attr
+    Traceback (most recent call last):
+    ...
+    ValueError: ('Invalid object reference...invalid-name...
+    >>> EntryPoint(name=None, group=None, value='invalid-name').extras
+    Traceback (most recent call last):
+    ...
+    ValueError: ('Invalid object reference...invalid-name...
+
+    Construction never raises; the value is validated only when
+    accessed or loaded.
+
+    >>> ep = EntryPoint(name=None, group=None, value='invalid-name')
+    >>> ep.load()
+    Traceback (most recent call last):
+    ...
+    ValueError: ('Invalid object reference...invalid-name...
+
     """
 
     pattern = re.compile(
@@ -175,7 +224,7 @@ class EntryPoint:
     value: str
     group: str
 
-    dist: Optional[Distribution] = None
+    dist: IDistribution | None = None
 
     def __init__(self, name: str, value: str, group: str) -> None:
         vars(self).update(name=name, value=value, group=group)
@@ -185,28 +234,33 @@ class EntryPoint:
         is indicated by the value, return that module. Otherwise,
         return the named object.
         """
-        match = cast(Match, self.pattern.match(self.value))
-        module = import_module(match.group('module'))
-        attrs = filter(None, (match.group('attr') or '').split('.'))
+        module = import_module(self.module)
+        attrs = filter(None, (self.attr or '').split('.'))
         return functools.reduce(getattr, attrs, module)
 
     @property
     def module(self) -> str:
-        match = self.pattern.match(self.value)
-        assert match is not None
-        return match.group('module')
+        return self._match.module
 
     @property
     def attr(self) -> str:
-        match = self.pattern.match(self.value)
-        assert match is not None
-        return match.group('attr')
+        return self._match.attr
 
     @property
-    def extras(self) -> List[str]:
+    def extras(self) -> list[str]:
+        return re.findall(r'\w+', self._match.extras or '')
+
+    @functools.cached_property
+    def _match(self) -> _EntryPointMatch:
         match = self.pattern.match(self.value)
-        assert match is not None
-        return re.findall(r'\w+', match.group('extras') or '')
+        if not match:
+            raise ValueError(
+                'Invalid object reference. '
+                'See https://packaging.python.org'
+                '/en/latest/specifications/entry-points/#data-model',
+                self.value,
+            )
+        return _EntryPointMatch(**match.groupdict())
 
     def _for(self, dist):
         vars(self).update(dist=dist)
@@ -295,24 +349,24 @@ class EntryPoints(tuple):
         Repr with classname and tuple constructor to
         signal that we deviate from regular tuple behavior.
         """
-        return '%s(%r)' % (self.__class__.__name__, tuple(self))
+        return f'{self.__class__.__name__}({tuple(self)!r})'
 
     def select(self, **params) -> EntryPoints:
         """
         Select entry points from self that match the
         given parameters (typically group and/or name).
         """
-        return EntryPoints(ep for ep in self if py39.ep_matches(ep, **params))
+        return EntryPoints(ep for ep in self if ep.matches(**params))
 
     @property
-    def names(self) -> Set[str]:
+    def names(self) -> set[str]:
         """
         Return the set of all names of all entry points.
         """
         return {ep.name for ep in self}
 
     @property
-    def groups(self) -> Set[str]:
+    def groups(self) -> set[str]:
         """
         Return the set of all groups of all entry points.
         """
@@ -333,9 +387,9 @@ class EntryPoints(tuple):
 class PackagePath(pathlib.PurePosixPath):
     """A reference to a path in a package"""
 
-    hash: Optional[FileHash]
+    hash: FileHash | None
     size: int
-    dist: Distribution
+    dist: IDistribution
 
     def read_text(self, encoding: str = 'utf-8') -> str:
         return self.locate().read_text(encoding=encoding)
@@ -356,6 +410,25 @@ class FileHash:
         return f'<FileHash mode: {self.mode} value: {self.value}>'
 
 
+def _identify_dist(
+    accessor: Callable[[Distribution], str],
+) -> Callable[[Distribution], str]:
+    """
+    Decorate a required metadata accessor to identify the distribution
+    in the error raised when its field is absent.
+    """
+
+    @functools.wraps(accessor)
+    def wrapper(self: Distribution) -> str:
+        try:
+            return accessor(self)
+        except KeyError as exc:
+            (field,) = exc.args
+            raise KeyError(f'Metadata field {field} not present in {self}') from None
+
+    return wrapper
+
+
 class Distribution(metaclass=abc.ABCMeta):
     """
     An abstract Python distribution package.
@@ -368,7 +441,7 @@ class Distribution(metaclass=abc.ABCMeta):
     """
 
     @abc.abstractmethod
-    def read_text(self, filename) -> Optional[str]:
+    def read_text(self, filename) -> str | None:
         """Attempt to load metadata file given by the name.
 
         Python distribution metadata is organized by blobs of text
@@ -409,6 +482,7 @@ class Distribution(metaclass=abc.ABCMeta):
         """
 
     @classmethod
+    @apply(localize.dist)
     def from_name(cls, name: str) -> Distribution:
         """Return the Distribution for the given package name.
 
@@ -424,11 +498,12 @@ class Distribution(metaclass=abc.ABCMeta):
         try:
             return next(iter(cls._prefer_valid(cls.discover(name=name))))
         except StopIteration:
-            raise PackageNotFoundError(name)
+            raise PackageNotFoundError(name) from None
 
     @classmethod
+    @apply(functools.partial(map, localize.dist))
     def discover(
-        cls, *, context: Optional[DistributionFinder.Context] = None, **kwargs
+        cls, *, context: DistributionFinder.Context | None = None, **kwargs
     ) -> Iterable[Distribution]:
         """Return an iterable of Distribution objects for all packages.
 
@@ -447,13 +522,14 @@ class Distribution(metaclass=abc.ABCMeta):
         )
 
     @staticmethod
-    def _prefer_valid(dists: Iterable[Distribution]) -> Iterable[Distribution]:
+    def _prefer_valid(dists: Iterable[_D]) -> Iterable[_D]:
         """
         Prefer (move to the front) distributions that have metadata.
 
         Ref python/importlib_resources#489.
         """
-        buckets = bucket(dists, lambda dist: bool(dist.metadata))
+
+        buckets = bucket(dists, _safe_has_metadata)
         return itertools.chain(buckets[True], buckets[False])
 
     @staticmethod
@@ -474,7 +550,8 @@ class Distribution(metaclass=abc.ABCMeta):
         return filter(None, declared)
 
     @property
-    def metadata(self) -> _meta.PackageMetadata:
+    @apply(localize.message)
+    def metadata(self) -> PackageMetadata:
         """Return the parsed metadata for this Distribution.
 
         The returned object will have keys that name the various bits of
@@ -483,11 +560,22 @@ class Distribution(metaclass=abc.ABCMeta):
 
         Custom providers may provide the METADATA file or override this
         property.
-        """
-        # deferred for performance (python/cpython#109829)
-        from . import _adapters
 
-        opt_text = (
+        :raises MetadataNotFound: If no metadata file is present.
+        """
+
+        text = self._metadata_text()
+        return self._assemble_message(self._ensure_metadata_present(text))
+
+    def _metadata_text(self) -> str | None:
+        """
+        The metadata text, if any.
+
+        Separate from ``metadata`` so that ``_has_metadata`` can name
+        the same files without repeating them and without paying to
+        parse what it finds.
+        """
+        return (
             self.read_text('METADATA')
             or self.read_text('PKG-INFO')
             # This last clause is here to support old egg-info files.  Its
@@ -495,10 +583,34 @@ class Distribution(metaclass=abc.ABCMeta):
             # (which points to the egg-info file) attribute unchanged.
             or self.read_text('')
         )
-        text = cast(str, opt_text)
+
+    def _has_metadata(self) -> bool:
+        """
+        Whether this distribution supplies metadata.
+
+        Reads the metadata, as the interface offers nothing cheaper:
+        ``locate_file`` resolves against the package root and not the
+        metadata, and every other member loads the metadata or parses
+        it. A subclass able to detect the metadata without reading it
+        should override this (python/importlib_metadata#534).
+        """
+        return bool(self._metadata_text())
+
+    @staticmethod
+    def _assemble_message(text: str) -> PackageMetadata:
+        # deferred for performance (python/cpython#109829)
+        from . import _adapters
+
         return _adapters.Message(email.message_from_string(text))
 
+    def _ensure_metadata_present(self, text: str | None) -> str:
+        if text is not None:
+            return text
+
+        raise MetadataNotFound('No package metadata was found.')
+
     @property
+    @_identify_dist
     def name(self) -> str:
         """Return the 'Name' metadata for the distribution package."""
         return self.metadata['Name']
@@ -509,6 +621,7 @@ class Distribution(metaclass=abc.ABCMeta):
         return Prepared.normalize(self.name)
 
     @property
+    @_identify_dist
     def version(self) -> str:
         """Return the 'Version' metadata for the distribution package."""
         return self.metadata['Version']
@@ -524,10 +637,11 @@ class Distribution(metaclass=abc.ABCMeta):
         return EntryPoints._from_text_for(self.read_text('entry_points.txt'), self)
 
     @property
-    def files(self) -> Optional[List[PackagePath]]:
+    @apply(pass_none(compose(list, functools.partial(map, localize.package_path))))
+    def files(self) -> list[IPackagePath] | None:
         """Files in this distribution.
 
-        :return: List of PackagePath for this distribution or None
+        :return: List of PackagePath-like objects for this distribution or None
 
         Result is `None` if the metadata file that enumerates files
         (i.e. RECORD for dist-info, or installed-files.txt or
@@ -593,7 +707,8 @@ class Distribution(metaclass=abc.ABCMeta):
             return
 
         paths = (
-            py311.relative_fix((subdir / name).resolve())
+            py311
+            .relative_fix((subdir / name).resolve())
             .relative_to(self.locate_file('').resolve(), walk_up=True)
             .as_posix()
             for name in text.splitlines()
@@ -616,7 +731,7 @@ class Distribution(metaclass=abc.ABCMeta):
         return text and map('"{}"'.format, text.splitlines())
 
     @property
-    def requires(self) -> Optional[List[str]]:
+    def requires(self) -> list[str] | None:
         """Generated requirements specified for this Distribution"""
         reqs = self._read_dist_info_reqs() or self._read_egg_info_reqs()
         return reqs and list(reqs)
@@ -649,7 +764,7 @@ class Distribution(metaclass=abc.ABCMeta):
 
         def quoted_marker(section):
             section = section or ''
-            extra, sep, markers = section.partition(':')
+            extra, _sep, markers = section.partition(':')
             if extra and markers:
                 markers = f'({markers})'
             conditions = list(filter(None, [markers, make_condition(extra)]))
@@ -722,7 +837,7 @@ class DistributionFinder(MetaPathFinder):
             vars(self).update(kwargs)
 
         @property
-        def path(self) -> List[str]:
+        def path(self) -> list[str]:
             """
             The sequence of directory path that a distribution finder
             should search.
@@ -743,6 +858,20 @@ class DistributionFinder(MetaPathFinder):
         """
 
 
+@passthrough
+def _clear_after_fork(cached):
+    """Ensure ``func`` clears cached state after ``fork`` when supported.
+
+    ``FastPath`` caches zip-backed ``pathlib.Path`` objects that retain a
+    reference to the parent's open ``ZipFile`` handle. Re-using a cached
+    instance in a forked child can therefore resurrect invalid file pointers
+    and trigger ``BadZipFile``/``OSError`` failures (python/importlib_metadata#520).
+    Registering ``cache_clear`` with ``os.register_at_fork`` keeps each process
+    on its own cache.
+    """
+    getattr(os, 'register_at_fork', noop)(after_in_child=cached.cache_clear)
+
+
 class FastPath:
     """
     Micro-optimized class for searching a root for children.
@@ -759,7 +888,8 @@ class FastPath:
     True
     """
 
-    @functools.lru_cache()  # type: ignore[misc]
+    @_clear_after_fork  # type: ignore[misc]
+    @functools.lru_cache
     def __new__(cls, root):
         return super().__new__(cls)
 
@@ -874,7 +1004,7 @@ class Prepared:
     normalized = None
     legacy_normalized = None
 
-    def __init__(self, name: Optional[str]):
+    def __init__(self, name: str | None):
         self.name = name
         if name is None:
             return
@@ -944,7 +1074,17 @@ class PathDistribution(Distribution):
         """
         self._path = path
 
-    def read_text(self, filename: str | os.PathLike[str]) -> Optional[str]:
+    def __str__(self) -> str:
+        """
+        Render as the metadata path, identifying the distribution
+        even when its metadata cannot name it.
+
+        >>> str(Distribution.at('foo-1.0.dist-info'))
+        'foo-1.0.dist-info'
+        """
+        return str(self._path)
+
+    def read_text(self, filename: str | os.PathLike[str]) -> str | None:
         with suppress(
             FileNotFoundError,
             IsADirectoryError,
@@ -957,6 +1097,24 @@ class PathDistribution(Distribution):
         return None
 
     read_text.__doc__ = Distribution.read_text.__doc__
+
+    def _has_metadata(self) -> bool:
+        """
+        Detect the metadata file without opening it
+        (python/importlib_metadata#534).
+
+        The last clause is for an old-style egg-info file, whose
+        metadata is the distribution's own path; a metadata directory
+        is not itself metadata. ``SimplePath`` doesn't name
+        ``is_file``, but only these legacy paths reach that clause and
+        they arrive as a ``pathlib.Path`` or a ``zipfile.Path``, both
+        of which supply it.
+        """
+        return (
+            self._path.joinpath('METADATA').exists()
+            or self._path.joinpath('PKG-INFO').exists()
+            or self._path.is_file()  # type: ignore[attr-defined]
+        )
 
     def locate_file(self, path: str | os.PathLike[str]) -> SimplePath:
         return self._path.parent / path
@@ -987,11 +1145,11 @@ class PathDistribution(Distribution):
         filename, ext = os.path.splitext(stem)
         if ext not in ('.dist-info', '.egg-info'):
             return
-        name, sep, rest = filename.partition('-')
+        name, _sep, _rest = filename.partition('-')
         return name
 
 
-def distribution(distribution_name: str) -> Distribution:
+def distribution(distribution_name: str) -> IDistribution:
     """Get the ``Distribution`` instance for the named package.
 
     :param distribution_name: The name of the distribution package as a string.
@@ -1000,7 +1158,7 @@ def distribution(distribution_name: str) -> Distribution:
     return Distribution.from_name(distribution_name)
 
 
-def distributions(**kwargs) -> Iterable[Distribution]:
+def distributions(**kwargs) -> Iterable[IDistribution]:
     """Get all ``Distribution`` instances in the current environment.
 
     :return: An iterable of ``Distribution`` instances.
@@ -1008,11 +1166,12 @@ def distributions(**kwargs) -> Iterable[Distribution]:
     return Distribution.discover(**kwargs)
 
 
-def metadata(distribution_name: str) -> _meta.PackageMetadata:
+def metadata(distribution_name: str) -> PackageMetadata:
     """Get the metadata for the named package.
 
     :param distribution_name: The name of the distribution package to query.
     :return: A PackageMetadata containing the parsed metadata.
+    :raises MetadataNotFound: If no metadata file is present in the distribution.
     """
     return Distribution.from_name(distribution_name).metadata
 
@@ -1027,9 +1186,28 @@ def version(distribution_name: str) -> str:
     return distribution(distribution_name).version
 
 
+def _safe_has_metadata(dist: IDistribution) -> bool:
+    """
+    ``dist._has_metadata()``, for a distribution that may not supply it.
+
+    A provider's own ``Distribution`` subclass derives from
+    ``importlib.metadata`` and is passed through unadapted (#486), so
+    it has none; read its metadata as the default would. It supplies
+    no ``_metadata_text`` either, hence the unbound call.
+
+    Such a distribution cannot be asked for ``metadata`` behind a trap
+    instead. The ``MetadataNotFound`` it raises is the one from
+    ``importlib.metadata``, a different class from this package's,
+    which no trap of ours would catch.
+    """
+    with suppress(AttributeError):
+        return dist._has_metadata()  # type: ignore[attr-defined]
+    return bool(Distribution._metadata_text(dist))  # type: ignore[arg-type]
+
+
 _unique = functools.partial(
     unique_everseen,
-    key=py39.normalized_name,
+    key=operator.attrgetter('_normalized_name'),
 )
 """
 Wrapper for ``distributions`` to return unique distributions by name.
@@ -1046,12 +1224,13 @@ def entry_points(**params) -> EntryPoints:
     :return: EntryPoints for all installed packages.
     """
     eps = itertools.chain.from_iterable(
-        dist.entry_points for dist in _unique(distributions())
+        dist.entry_points
+        for dist in _unique(Distribution._prefer_valid(distributions()))
     )
     return EntryPoints(eps).select(**params)
 
 
-def files(distribution_name: str) -> Optional[List[PackagePath]]:
+def files(distribution_name: str) -> list[IPackagePath] | None:
     """Return a list of files for the named package.
 
     :param distribution_name: The name of the distribution package to query.
@@ -1060,7 +1239,7 @@ def files(distribution_name: str) -> Optional[List[PackagePath]]:
     return distribution(distribution_name).files
 
 
-def requires(distribution_name: str) -> Optional[List[str]]:
+def requires(distribution_name: str) -> list[str] | None:
     """
     Return a list of requirements for the named package.
 
@@ -1070,7 +1249,7 @@ def requires(distribution_name: str) -> Optional[List[str]]:
     return distribution(distribution_name).requires
 
 
-def packages_distributions() -> Mapping[str, List[str]]:
+def packages_distributions() -> Mapping[str, list[str]]:
     """
     Return a mapping of top-level packages to their
     distributions.
@@ -1091,7 +1270,7 @@ def _top_level_declared(dist):
     return (dist.read_text('top_level.txt') or '').split()
 
 
-def _topmost(name: PackagePath) -> Optional[str]:
+def _topmost(name: IPackagePath) -> str | None:
     """
     Return the top-most parent as long as there is a parent.
     """
@@ -1099,7 +1278,7 @@ def _topmost(name: PackagePath) -> Optional[str]:
     return top if rest else None
 
 
-def _get_toplevel_name(name: PackagePath) -> str:
+def _get_toplevel_name(name: IPackagePath) -> str:
     """
     Infer a possibly importable module name from a name presumed on
     sys.path.

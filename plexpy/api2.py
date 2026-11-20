@@ -15,17 +15,15 @@
 #  You should have received a copy of the GNU General Public License
 #  along with Tautulli.  If not, see <http://www.gnu.org/licenses/>.
 
-from hashing_passwords import check_hash
 from io import open
 
-import hashlib
 import inspect
 import json
 import os
-import random
 import re
 import time
 import traceback
+from hmac import compare_digest
 
 import cherrypy
 import xmltodict
@@ -47,8 +45,14 @@ from plexpy import users
 
 
 class API2(object):
+    # The set of valid API methods is static; computed once instead of
+    # re-introspecting every method with inspect on each API call
+    _api_valid_methods_cached = None
+
     def __init__(self, **kwargs):
-        self._api_valid_methods = self._api_docs().keys()
+        if API2._api_valid_methods_cached is None:
+            API2._api_valid_methods_cached = frozenset(self._api_docs().keys())
+        self._api_valid_methods = API2._api_valid_methods_cached
         self._api_authenticated = False
         self._api_out_type = 'json'  # default
         self._api_msg = None
@@ -99,8 +103,8 @@ class API2(object):
             self._api_msg = 'API key not generated correctly'
             self._api_response_code = 401
 
-        elif 'apikey' not in kwargs:
-            self._api_msg = 'Parameter apikey is required'
+        elif 'apikey' not in kwargs and 'X-Api-Key' not in cherrypy.request.headers:
+            self._api_msg = 'Parameter apikey is required or X-Api-Key header is required'
             self._api_response_code = 401
 
         elif 'cmd' not in kwargs:
@@ -112,7 +116,7 @@ class API2(object):
             self._api_response_code = 400
 
         self._api_callback = kwargs.pop('callback', None)
-        self._api_apikey = kwargs.pop('apikey', None)
+        self._api_apikey = kwargs.pop('apikey', cherrypy.request.headers.get('X-Api-Key', None))
         self._api_cmd = kwargs.pop('cmd', None)
         self._api_debug = kwargs.pop('debug', False)
         self._api_profileme = kwargs.pop('profileme', None)
@@ -122,8 +126,9 @@ class API2(object):
         if 'app' in kwargs and helpers.bool_true(kwargs.pop('app')):
             self._api_app = True
 
-        if plexpy.CONFIG.API_ENABLED and not self._api_msg or self._api_cmd in ('get_apikey', 'docs', 'docs_md'):
-            if not self._api_app and self._api_apikey == plexpy.CONFIG.API_KEY:
+        if plexpy.CONFIG.API_ENABLED and not self._api_msg or self._api_cmd in ('docs', 'docs_md'):
+            if not self._api_app and isinstance(self._api_apikey, str) and \
+                    compare_digest(self._api_apikey.encode('utf-8'), plexpy.CONFIG.API_KEY.encode('utf-8')):
                 self._api_authenticated = True
 
             elif self._api_app and mobile_app.get_temp_device_token(self._api_apikey) and \
@@ -142,14 +147,14 @@ class API2(object):
                 self._api_msg = None
                 self._api_kwargs = kwargs
 
-            elif not self._api_authenticated and self._api_cmd in ('get_apikey', 'docs', 'docs_md'):
+            elif not self._api_authenticated and self._api_cmd in ('docs', 'docs_md'):
                 self._api_authenticated = True
                 # Remove the old error msg
                 self._api_msg = None
                 self._api_kwargs = kwargs
 
         if self._api_msg:
-            logger.api_debug('Tautulli APIv2 :: %s.' % self._api_msg)
+            logger.api_warn('Tautulli APIv2 :: %r.' % self._api_msg)
 
         logger.api_debug('Tautulli APIv2 :: Cleaned kwargs: %s' % self._api_kwargs)
 
@@ -221,23 +226,10 @@ class API2(object):
                     }
                     templog.append(d)
 
-        if order == 'desc':
-            templog = templog[::-1]
-
-        if end > 0 or start > 0:
-            logger.api_debug("Tautulli APIv2 :: Slicing the log from %s to %s" % (start, end))
-            templog = templog[start:end]
-
-        if sort:
-            logger.api_debug("Tautulli APIv2 :: Sorting log based on '%s'" % sort)
-            templog = sorted(templog, key=lambda k: k[sort])
-
         if search:
             logger.api_debug("Tautulli APIv2 :: Searching log values for '%s'" % search)
-            tt = [d for d in templog for k, v in d.items() if search.lower() in v.lower()]
-
-            if len(tt):
-                templog = tt
+            tt = [d for d in templog if any(search.lower() in str(v).lower() for v in d.values())]
+            templog = tt
 
         if regex:
             tt = []
@@ -245,9 +237,18 @@ class API2(object):
                 stringdict = ' '.join('{}{}'.format(k, v) for k, v in l.items())
                 if reg.search(stringdict):
                     tt.append(l)
+            templog = tt
 
-            if len(tt):
-                templog = tt
+        if order == 'desc':
+            templog = templog[::-1]
+
+        if sort:
+            logger.api_debug("Tautulli APIv2 :: Sorting log based on '%s'" % sort)
+            templog = sorted(templog, key=lambda k: k[sort])
+
+        if end > 0 or start > 0:
+            logger.api_debug("Tautulli APIv2 :: Slicing the log from %s to %s" % (start, end))
+            templog = templog[start:end]
 
         return templog
 
@@ -328,7 +329,7 @@ class API2(object):
         else:
             # If the backup is less then 24 h old lets make a backup
             if not any(os.path.getctime(os.path.join(plexpy.CONFIG.BACKUP_DIR, file_)) > (time.time() - 86400)
-                    and file_.endswith('.db') for file_ in os.listdir(plexpy.CONFIG.BACKUP_DIR)):
+                    and file_.endswith('.db.zip') for file_ in os.listdir(plexpy.CONFIG.BACKUP_DIR)):
                 self.backup_db()
 
         db = database.MonitorDatabase()
@@ -380,7 +381,7 @@ class API2(object):
         return data
 
     def register_device(self, device_id='', device_name='', platform=None, version=None,
-                        friendly_name='', onesignal_id=None, min_version='', **kwargs):
+                        friendly_name='', push_token=None, min_version='', **kwargs):
         """ Registers the Tautulli Remote App.
 
             ```
@@ -392,14 +393,13 @@ class API2(object):
                 platform (str):           The platform of the mobile devices
                 version (str):            The version of the app
                 friendly_name (str):      A friendly name to identify the mobile device
-                onesignal_id (str):       The OneSignal id for the mobile device
+                push_token (str):         The push notification token for the mobile device
                 min_version (str):        The minimum Tautulli version supported by the mobile device, e.g. v2.5.6
 
             Returns:
                 json:
                     {"pms_identifier": "08u2phnlkdshf890bhdlksghnljsahgleikjfg9t",
                      "pms_ip": "10.10.10.1",
-                     "pms_is_remote": 0,
                      "pms_name": "Winterfell-Server",
                      "pms_platform": "Windows",
                      "pms_plexpass": 1,
@@ -438,17 +438,13 @@ class API2(object):
             self._api_result_type = 'error'
             return
 
-        ## TODO: Temporary for backwards compatibility, assume device_id is onesignal_id
-        if device_id and onesignal_id is None:
-            onesignal_id = device_id
-
         result = mobile_app.add_mobile_device(device_id=device_id,
                                               device_name=device_name,
                                               device_token=self._api_apikey,
                                               platform=platform,
                                               version=version,
                                               friendly_name=friendly_name,
-                                              onesignal_id=onesignal_id)
+                                              push_token=push_token)
 
         if result:
             self._api_msg = 'Device registration successful.'
@@ -500,6 +496,9 @@ class API2(object):
             self._api_msg = 'Notification failed: invalid notifier_id provided %s.' % notifier_id
             self._api_result_type = 'error'
             return
+
+        # Remove notify_action if present, as it will be set to 'api' in the notify call
+        kwargs.pop('notify_action', None)
 
         logger.api_debug('Tautulli APIv2 :: Sending notification.')
         success = notification_handler.notify(notifier_id=notifier_id,
@@ -569,10 +568,25 @@ class API2(object):
         head = '''## General structure
 The API endpoint is
 ```
+http://IP_ADDRESS:PORT + [/HTTP_ROOT] + /api/v2?cmd=$command
+```
+
+The API key can be passed as an `X-Api-Key` header (in v2.18.0 or greater) or as an `apikey` parameter. The header is preferred for security reasons.
+```
+http://IP_ADDRESS:PORT + [/HTTP_ROOT] + /api/v2?cmd=$command
+HEADER: X-Api-Key: $apikey
+```
+Or
+```
 http://IP_ADDRESS:PORT + [/HTTP_ROOT] + /api/v2?apikey=$apikey&cmd=$command
 ```
 
 Example:
+```
+http://localhost:8181/api/v2?cmd=get_metadata&rating_key=153037
+HEADER: X-Api-Key: 66198313a092496b8a725867d2223b5f
+```
+Or
 ```
 http://localhost:8181/api/v2?apikey=66198313a092496b8a725867d2223b5f&cmd=get_metadata&rating_key=153037
 ```
@@ -615,47 +629,6 @@ General optional parameters:
         result = head + '\n\n' + body
         return '<pre>' + result + '</pre>'
 
-    def get_apikey(self, username='', password=''):
-        """ Get the apikey. Username and password are required
-            if auth is enabled. Makes and saves the apikey if it does not exist.
-
-            ```
-            Required parameters:
-                None
-
-            Optional parameters:
-                username (str):     Your Tautulli username
-                password (str):     Your Tautulli password
-
-            Returns:
-                string:             "apikey"
-            ```
-         """
-        data = None
-        apikey = hashlib.sha224(str(random.getrandbits(256)).encode('utf-8')).hexdigest()[0:32]
-        if plexpy.CONFIG.HTTP_USERNAME and plexpy.CONFIG.HTTP_PASSWORD:
-            authenticated = username == plexpy.CONFIG.HTTP_USERNAME and check_hash(password, plexpy.CONFIG.HTTP_PASSWORD)
-
-            if authenticated:
-                if plexpy.CONFIG.API_KEY:
-                    data = plexpy.CONFIG.API_KEY
-                else:
-                    data = apikey
-                    plexpy.CONFIG.API_KEY = apikey
-                    plexpy.CONFIG.write()
-            else:
-                self._api_msg = 'Authentication is enabled, please add the correct username and password to the parameters'
-        else:
-            if plexpy.CONFIG.API_KEY:
-                data = plexpy.CONFIG.API_KEY
-            else:
-                # Make a apikey if the doesn't exist
-                data = apikey
-                plexpy.CONFIG.API_KEY = apikey
-                plexpy.CONFIG.write()
-
-        return data
-
     def _api_responds(self, result_type='error', data=None, msg=''):
         """ Formats the result to a predefined dict so we can change it the to
             the desired output by _api_out_as """
@@ -675,7 +648,6 @@ General optional parameters:
 
         elif self._api_cmd == 'pms_image_proxy':
             if 'return_hash' not in self._api_kwargs:
-                cherrypy.response.headers['Content-Type'] = 'image/jpeg'
                 return out['response']['data']
 
         elif self._api_cmd == 'get_geoip_lookup':
@@ -692,6 +664,8 @@ General optional parameters:
                 else:
                     out = json.dumps(out, ensure_ascii=False)
                 if self._api_callback is not None:
+                    if not re.match(r'^[a-zA-Z_$][a-zA-Z0-9_$.]*$', self._api_callback):
+                        raise cherrypy.HTTPError(400, 'Invalid callback identifier')
                     cherrypy.response.headers['Content-Type'] = 'application/javascript'
                     # wrap with JSONP call if requested
                     out = self._api_callback + '(' + out + ');'
@@ -707,7 +681,7 @@ General optional parameters:
             try:
                 out = xmltodict.unparse(out, pretty=True)
             except Exception as e:
-                logger.api_error('Tautulli APIv2 :: Failed to parse xml result')
+                logger.api_exception('Tautulli APIv2 :: Failed to parse xml result')
                 self._api_response_code = 500
                 try:
                     out['message'] = e
@@ -715,7 +689,7 @@ General optional parameters:
                     out = xmltodict.unparse(out, pretty=True)
 
                 except Exception as e:
-                    logger.api_error('Tautulli APIv2 :: Failed to parse xml result error message %s' % e)
+                    logger.api_exception('Tautulli APIv2 :: Failed to parse xml result error message %s' % e)
                     out = '''<?xml version="1.0" encoding="utf-8"?>
                                 <response>
                                     <message>%s</message>
@@ -733,12 +707,11 @@ General optional parameters:
         if kwargs.get('cmd') == 'register_device':
             if kwargs.get('device_id'):
                 logger._BLACKLIST_WORDS.add(kwargs['device_id'])
+            # Old app versions still send their OneSignal id.
             if kwargs.get('onesignal_id'):
                 logger._BLACKLIST_WORDS.add(kwargs['onesignal_id'])
-
-        elif kwargs.get('cmd') == 'get_apikey':
-            if kwargs.get('password'):
-                logger._BLACKLIST_WORDS.add(kwargs['password'])
+            if kwargs.get('push_token'):
+                logger._BLACKLIST_WORDS.add(kwargs['push_token'])
 
         result = None
         logger.api_debug('Tautulli APIv2 :: API called with kwargs: %s' % kwargs)
@@ -759,7 +732,7 @@ General optional parameters:
 
                 result = call(**self._api_kwargs)
             except Exception as e:
-                logger.api_error('Tautulli APIv2 :: Failed to run %s with %s: %s' % (self._api_cmd, self._api_kwargs, e))
+                logger.api_exception('Tautulli APIv2 :: Failed to run %s with %s: %s' % (self._api_cmd, self._api_kwargs, e))
                 self._api_response_code = 500
                 if self._api_debug:
                     cherrypy.request.show_tracebacks = True
@@ -806,7 +779,7 @@ General optional parameters:
 
         if self._api_result_type == 'success' and not self._api_response_code:
             self._api_response_code = 200
-        elif self._api_result_type == 'error' and self._api_response_code != 500:
+        elif self._api_result_type == 'error' and (not self._api_response_code or self._api_response_code < 400):
             self._api_response_code = 400
 
         if not self._api_response_code:

@@ -1,24 +1,16 @@
-# -*- coding: utf-8 -*-
 import os
 from pathlib import Path
 from urllib.parse import quote_plus
 
 from plexapi import media, utils, video
-from plexapi.base import Playable, PlexPartialObject, PlexSession
+from plexapi.base import Playable, PlexPartialObject, PlexSession, cached_data_property
 from plexapi.exceptions import BadRequest
-from plexapi.mixins import (
-    RatingMixin,
-    ArtUrlMixin, ArtMixin, PosterUrlMixin, PosterMixin,
-    PhotoalbumEditMixins, PhotoEditMixins
-)
+from plexapi.mixins import PhotoalbumMixins, PhotoMixins
 
 
 @utils.registerPlexObject
 class Photoalbum(
-    PlexPartialObject,
-    RatingMixin,
-    ArtMixin, PosterMixin,
-    PhotoalbumEditMixins
+    PlexPartialObject, PhotoalbumMixins
 ):
     """ Represents a single Photoalbum (collection of photos).
 
@@ -56,9 +48,7 @@ class Photoalbum(
         self.addedAt = utils.toDatetime(data.attrib.get('addedAt'))
         self.art = data.attrib.get('art')
         self.composite = data.attrib.get('composite')
-        self.fields = self.findItems(data, media.Field)
         self.guid = data.attrib.get('guid')
-        self.images = self.findItems(data, media.Image)
         self.index = utils.cast(int, data.attrib.get('index'))
         self.key = data.attrib.get('key', '').replace('/children', '')  # FIX_BUG_50
         self.lastRatedAt = utils.toDatetime(data.attrib.get('lastRatedAt'))
@@ -75,18 +65,26 @@ class Photoalbum(
         self.updatedAt = utils.toDatetime(data.attrib.get('updatedAt'))
         self.userRating = utils.cast(float, data.attrib.get('userRating'))
 
+    @cached_data_property
+    def fields(self):
+        return self.findItems(self._data, media.Field)
+
+    @cached_data_property
+    def images(self):
+        return self.findItems(self._data, media.Image)
+
     def album(self, title):
         """ Returns the :class:`~plexapi.photo.Photoalbum` that matches the specified title.
 
             Parameters:
                 title (str): Title of the photo album to return.
         """
-        key = f'{self.key}/children'
+        key = self._buildQueryKey(f'{self.key}/children')
         return self.fetchItem(key, Photoalbum, title__iexact=title)
 
     def albums(self, **kwargs):
         """ Returns a list of :class:`~plexapi.photo.Photoalbum` objects in the album. """
-        key = f'{self.key}/children'
+        key = self._buildQueryKey(f'{self.key}/children')
         return self.fetchItems(key, Photoalbum, **kwargs)
 
     def photo(self, title):
@@ -95,12 +93,12 @@ class Photoalbum(
             Parameters:
                 title (str): Title of the photo to return.
         """
-        key = f'{self.key}/children'
+        key = self._buildQueryKey(f'{self.key}/children')
         return self.fetchItem(key, Photo, title__iexact=title)
 
     def photos(self, **kwargs):
         """ Returns a list of :class:`~plexapi.photo.Photo` objects in the album. """
-        key = f'{self.key}/children'
+        key = self._buildQueryKey(f'{self.key}/children')
         return self.fetchItems(key, Photo, **kwargs)
 
     def clip(self, title):
@@ -109,12 +107,12 @@ class Photoalbum(
             Parameters:
                 title (str): Title of the clip to return.
         """
-        key = f'{self.key}/children'
+        key = self._buildQueryKey(f'{self.key}/children')
         return self.fetchItem(key, video.Clip, title__iexact=title)
 
     def clips(self, **kwargs):
         """ Returns a list of :class:`~plexapi.video.Clip` objects in the album. """
-        key = f'{self.key}/children'
+        key = self._buildQueryKey(f'{self.key}/children')
         return self.fetchItems(key, video.Clip, **kwargs)
 
     def get(self, title):
@@ -151,10 +149,7 @@ class Photoalbum(
 
 @utils.registerPlexObject
 class Photo(
-    PlexPartialObject, Playable,
-    RatingMixin,
-    ArtUrlMixin, PosterUrlMixin,
-    PhotoEditMixins
+    PlexPartialObject, Playable, PhotoMixins
 ):
     """ Represents a single Photo.
 
@@ -205,9 +200,7 @@ class Photo(
         self.addedAt = utils.toDatetime(data.attrib.get('addedAt'))
         self.createdAtAccuracy = data.attrib.get('createdAtAccuracy')
         self.createdAtTZOffset = utils.cast(int, data.attrib.get('createdAtTZOffset'))
-        self.fields = self.findItems(data, media.Field)
         self.guid = data.attrib.get('guid')
-        self.images = self.findItems(data, media.Image)
         self.index = utils.cast(int, data.attrib.get('index'))
         self.key = data.attrib.get('key', '')
         self.lastRatedAt = utils.toDatetime(data.attrib.get('lastRatedAt'))
@@ -215,7 +208,6 @@ class Photo(
         self.librarySectionKey = data.attrib.get('librarySectionKey')
         self.librarySectionTitle = data.attrib.get('librarySectionTitle')
         self.listType = 'photo'
-        self.media = self.findItems(data, media.Media)
         self.originallyAvailableAt = utils.toDatetime(data.attrib.get('originallyAvailableAt'), '%Y-%m-%d')
         self.parentGuid = data.attrib.get('parentGuid')
         self.parentIndex = utils.cast(int, data.attrib.get('parentIndex'))
@@ -226,7 +218,6 @@ class Photo(
         self.ratingKey = utils.cast(int, data.attrib.get('ratingKey'))
         self.sourceURI = data.attrib.get('source')  # remote playlist item
         self.summary = data.attrib.get('summary')
-        self.tags = self.findItems(data, media.Tag)
         self.thumb = data.attrib.get('thumb')
         self.title = data.attrib.get('title')
         self.titleSort = data.attrib.get('titleSort', self.title)
@@ -234,6 +225,22 @@ class Photo(
         self.updatedAt = utils.toDatetime(data.attrib.get('updatedAt'))
         self.userRating = utils.cast(float, data.attrib.get('userRating'))
         self.year = utils.cast(int, data.attrib.get('year'))
+
+    @cached_data_property
+    def fields(self):
+        return self.findItems(self._data, media.Field)
+
+    @cached_data_property
+    def images(self):
+        return self.findItems(self._data, media.Image)
+
+    @cached_data_property
+    def media(self):
+        return self.findItems(self._data, media.Media)
+
+    @cached_data_property
+    def tags(self):
+        return self.findItems(self._data, media.Tag)
 
     def _prettyfilename(self):
         """ Returns a filename for use in download. """
@@ -243,7 +250,8 @@ class Photo(
 
     def photoalbum(self):
         """ Return the photo's :class:`~plexapi.photo.Photoalbum`. """
-        return self.fetchItem(self.parentKey)
+        key = self._buildQueryKey(self.parentKey)
+        return self.fetchItem(key)
 
     def section(self):
         """ Returns the :class:`~plexapi.library.LibrarySection` the item belongs to. """

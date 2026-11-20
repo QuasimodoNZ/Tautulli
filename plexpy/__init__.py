@@ -14,9 +14,10 @@
 #  along with Tautulli.  If not, see <http://www.gnu.org/licenses/>.
 
 import ctypes
-import datetime
+from datetime import datetime, timezone, timedelta
 import os
 import queue
+import secrets
 import sqlite3
 import sys
 import subprocess
@@ -33,7 +34,7 @@ except ImportError:
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 from ga4mp import GtagMP
-import pytz
+from hashing_passwords import make_hash
 
 from plexpy import activity_handler
 from plexpy import activity_pinger
@@ -78,6 +79,7 @@ DOCKER = False
 DOCKER_MOUNT = False
 SNAP = False
 SNAP_MIGRATE = False
+FLATPAK = False
 FROZEN = False
 
 SCHED = None
@@ -104,6 +106,8 @@ COMMITS_BEHIND = None
 PREV_RELEASE = None
 LATEST_RELEASE = None
 UPDATE_AVAILABLE = False
+# The token value that plex.tv rejected, kept in memory only.
+PLEXTV_BAD_TOKEN = None
 
 UMASK = None
 
@@ -194,6 +198,8 @@ def initialize(config_file):
             build = '[Docker] '
         elif SNAP:
             build = '[Snap] '
+        elif FLATPAK:
+            build = '[Flatpak] '
         elif FROZEN:
             build = '[Bundle] '
         else:
@@ -202,9 +208,10 @@ def initialize(config_file):
         logger.info("Starting Tautulli {}".format(
             common.RELEASE
         ))
-        logger.info("{}{} {} ({}{})".format(
+        logger.info("{}{} {} ({}{}) ({})".format(
             build, common.PLATFORM, common.PLATFORM_RELEASE, common.PLATFORM_VERSION,
-            ' - {}'.format(common.PLATFORM_LINUX_DISTRO) if common.PLATFORM_LINUX_DISTRO else ''
+            ' - {}'.format(common.PLATFORM_LINUX_DISTRO) if common.PLATFORM_LINUX_DISTRO else '',
+            common.PLATFORM_ARCHITECTURE
         ))
         logger.info("{} (UTC{})".format(
             str(SYS_TIMEZONE), SYS_UTC_OFFSET
@@ -244,19 +251,18 @@ def initialize(config_file):
         CONFIG.NEWSLETTER_DIR, _ = check_folder_writable(
             CONFIG.NEWSLETTER_DIR, os.path.join(DATA_DIR, 'newsletters'), 'newsletters')
 
+        if CONFIG.damaged_copy:
+            logger.error("Tautulli Config :: The config file %s is damaged. Tautulli copied it to %s "
+                         "and uses defaults for the missing settings. To restore, stop Tautulli. "
+                         "Then replace %s with the config.ini from the newest zip in %s that is older than this start. "
+                         "Tautulli deletes scheduled backups older than %s days, so restore soon.",
+                         config_file, CONFIG.damaged_copy, config_file, CONFIG.BACKUP_DIR, CONFIG.BACKUP_DAYS)
+
         # Initialize the database
-        logger.info("Checking if the database upgrades are required...")
         try:
             dbcheck()
         except Exception as e:
-            logger.error("Can't connect to the database: %s" % e)
-
-        # Perform upgrades
-        logger.info("Checking if configuration upgrades are required...")
-        try:
-            upgrade()
-        except Exception as e:
-            logger.error("Could not perform upgrades: %s" % e)
+            logger.exception("Can't connect to the database: %s" % e)
 
         # Add notifier configs to logger blacklist
         newsletters.blacklist_logger()
@@ -265,22 +271,24 @@ def initialize(config_file):
 
         # Check if Tautulli has a uuid
         if CONFIG.PMS_UUID == '' or not CONFIG.PMS_UUID:
-            logger.debug("Generating UUID...")
+            logger.info("Generating UUID...")
             CONFIG.PMS_UUID = generate_uuid()
             CONFIG.write()
 
         # Check if Tautulli has an API key
         if CONFIG.API_KEY == '':
-            logger.debug("Generating API key...")
+            logger.info("Generating API key...")
             CONFIG.API_KEY = generate_uuid()
             CONFIG.write()
 
         # Check if Tautulli has a jwt_secret
         if CONFIG.JWT_SECRET == '' or not CONFIG.JWT_SECRET or CONFIG.JWT_UPDATE_SECRET:
-            logger.debug("Generating JWT secret...")
+            logger.info("Generating JWT secret...")
             CONFIG.JWT_SECRET = generate_uuid()
             CONFIG.JWT_UPDATE_SECRET = False
             CONFIG.write()
+
+        generate_first_run_password()
 
         # Get the previous version from the file
         version_lock_file = os.path.join(DATA_DIR, "version.lock")
@@ -405,7 +413,7 @@ def daemonize():
 
 def launch_browser(host, port, root):
     if not no_browser:
-        if host in ('0.0.0.0', '::'):
+        if host in ('0.0.0.0', '::', ''):
             host = 'localhost'
 
         if CONFIG.ENABLE_HTTPS:
@@ -466,6 +474,9 @@ def initialize_scheduler():
             schedule_job(web_socket.send_ping, 'Websocket ping',
                          hours=0, minutes=0, seconds=10 * bool(CONFIG.WEBSOCKET_MONITOR_PING_PONG))
 
+            schedule_job(plextv.notify_token_expired, 'Check Tautulli Plex token',
+                         hours=1, minutes=0, seconds=0)
+
         else:
             # Cancel all jobs
             schedule_job(plextv.get_server_resources, 'Refresh Plex server URLs',
@@ -485,12 +496,19 @@ def initialize_scheduler():
             schedule_job(web_socket.send_ping, 'Websocket ping',
                          hours=0, minutes=0, seconds=0)
 
+            schedule_job(plextv.notify_token_expired, 'Check Tautulli Plex token',
+                         hours=0, minutes=0, seconds=0)
+
         # Start scheduler
         if start_jobs and len(SCHED.get_jobs()):
             try:
                 SCHED.start()
             except Exception as e:
-                logger.error(e)
+                logger.exception("Failed to start the scheduler: %s", e)
+
+
+def plextv_token_is_bad():
+    return bool(PLEXTV_BAD_TOKEN) and PLEXTV_BAD_TOKEN == CONFIG.PMS_TOKEN
 
 
 def schedule_job(func, name, hours=0, minutes=0, seconds=0, args=None):
@@ -506,16 +524,16 @@ def schedule_job(func, name, hours=0, minutes=0, seconds=0, args=None):
         if hours == 0 and minutes == 0 and seconds == 0:
             SCHED.remove_job(name)
             logger.info("Removed background task: %s", name)
-        elif job.trigger.interval != datetime.timedelta(hours=hours, minutes=minutes):
+        elif job.trigger.interval != timedelta(hours=hours, minutes=minutes, seconds=seconds):
             SCHED.reschedule_job(
                 name, trigger=IntervalTrigger(
-                    hours=hours, minutes=minutes, seconds=seconds, timezone=pytz.UTC),
+                    hours=hours, minutes=minutes, seconds=seconds, timezone=timezone.utc),
                 args=args)
             logger.info("Re-scheduled background task: %s", name)
     elif hours > 0 or minutes > 0 or seconds > 0:
         SCHED.add_job(
             func, id=name, trigger=IntervalTrigger(
-                hours=hours, minutes=minutes, seconds=seconds, timezone=pytz.UTC),
+                hours=hours, minutes=minutes, seconds=seconds, timezone=timezone.utc),
             args=args, misfire_grace_time=None)
         logger.info("Scheduled background task: %s", name)
 
@@ -530,9 +548,9 @@ def start():
         threading.Thread(target=startup_refresh).start()
 
         global SCHED
-        SCHED = BackgroundScheduler(timezone=pytz.UTC)
-        activity_handler.ACTIVITY_SCHED = BackgroundScheduler(timezone=pytz.UTC)
-        newsletter_handler.NEWSLETTER_SCHED = BackgroundScheduler(timezone=pytz.UTC)
+        SCHED = BackgroundScheduler(timezone=timezone.utc)
+        activity_handler.ACTIVITY_SCHED = BackgroundScheduler(timezone=timezone.utc)
+        newsletter_handler.NEWSLETTER_SCHED = BackgroundScheduler(timezone=timezone.utc)
 
         # Start the scheduler for stale stream callbacks
         activity_handler.ACTIVITY_SCHED.start()
@@ -541,6 +559,12 @@ def start():
         notification_handler.start_threads(num_threads=CONFIG.NOTIFICATION_THREADS)
         notifiers.check_browser_enabled()
 
+        # Repair any device left unvalidated by an earlier outage
+        mobile_app.revalidate_devices()
+
+        # Start background newsletter thread
+        newsletter_handler.start_thread()
+
         # Schedule newsletters
         newsletter_handler.NEWSLETTER_SCHED.start()
         newsletter_handler.schedule_newsletters()
@@ -548,23 +572,17 @@ def start():
         # Cancel processing exports
         exporter.cancel_exports()
 
-        if CONFIG.SYSTEM_ANALYTICS:
-            global TRACKER
-            TRACKER = initialize_tracker()
-
-            # Send system analytics events
-            if not CONFIG.FIRST_RUN_COMPLETE:
-                analytics_event(name='install')
-
-            elif _UPDATE:
-                analytics_event(name='update')
-
-            analytics_event(name='start')
+        if CONFIG.FIRST_RUN_COMPLETE:
+            run_analytics()
 
         _STARTED = True
 
 
 def startup_refresh():
+    # Check token hasn't expired
+    if CONFIG.PMS_TOKEN:
+        plextv.notify_token_expired()
+
     # Get the real PMS urls for SSL and remote access
     if CONFIG.PMS_TOKEN and CONFIG.PMS_IP and CONFIG.PMS_PORT:
         plextv.get_server_resources()
@@ -572,6 +590,9 @@ def startup_refresh():
     # Connect server after server resource is refreshed
     if CONFIG.FIRST_RUN_COMPLETE:
         activity_pinger.connect_server(log=True, startup=True)
+    else:
+        logger.info("Setup wizard not completed. Skipping Plex server connection.")
+
 
     # Refresh the users list on startup
     if CONFIG.PMS_TOKEN and CONFIG.REFRESH_USERS_ON_STARTUP:
@@ -589,6 +610,8 @@ def sig_handler(signum=None, frame=None):
 
 
 def dbcheck():
+    logger.info("Checking if the database upgrades are required...")
+
     conn_db = sqlite3.connect(DB_FILE)
     c_db = conn_db.cursor()
 
@@ -653,6 +676,7 @@ def dbcheck():
         "platform TEXT, platform_version TEXT, profile TEXT, machine_id TEXT, "
         "bandwidth INTEGER, location TEXT, quality_profile TEXT, secure INTEGER, relayed INTEGER, "
         "parent_rating_key INTEGER, grandparent_rating_key INTEGER, media_type TEXT, section_id INTEGER, "
+        "live INTEGER DEFAULT 0, transcode_decision TEXT, "
         "view_offset INTEGER DEFAULT 0)"
     )
 
@@ -705,6 +729,7 @@ def dbcheck():
         "is_active INTEGER DEFAULT 1, is_admin INTEGER DEFAULT 0, is_home_user INTEGER DEFAULT NULL, "
         "is_allow_sync INTEGER DEFAULT NULL, is_restricted INTEGER DEFAULT NULL, "
         "do_notify INTEGER DEFAULT 1, keep_history INTEGER DEFAULT 1, deleted_user INTEGER DEFAULT 0, "
+        "is_archived INTEGER DEFAULT 0, "
         "allow_guest INTEGER DEFAULT 0, user_token TEXT, server_token TEXT, shared_libraries TEXT, "
         "filter_all TEXT, filter_movies TEXT, filter_tv TEXT, filter_music TEXT, filter_photos TEXT)"
     )
@@ -716,7 +741,7 @@ def dbcheck():
         "thumb TEXT, custom_thumb_url TEXT, art TEXT, custom_art_url TEXT, "
         "count INTEGER, parent_count INTEGER, child_count INTEGER, is_active INTEGER DEFAULT 1, "
         "do_notify INTEGER DEFAULT 1, do_notify_created INTEGER DEFAULT 1, keep_history INTEGER DEFAULT 1, "
-        "deleted_section INTEGER DEFAULT 0, UNIQUE(server_id, section_id))"
+        "deleted_section INTEGER DEFAULT 0, is_archived INTEGER DEFAULT 0, UNIQUE(server_id, section_id))"
     )
 
     # user_login table :: This table keeps record of the Tautulli guest logins
@@ -738,22 +763,25 @@ def dbcheck():
         "on_watched INTEGER DEFAULT 0, on_created INTEGER DEFAULT 0, "
         "on_extdown INTEGER DEFAULT 0, on_intdown INTEGER DEFAULT 0, "
         "on_extup INTEGER DEFAULT 0, on_intup INTEGER DEFAULT 0, on_pmsupdate INTEGER DEFAULT 0, "
-        "on_concurrent INTEGER DEFAULT 0, on_newdevice INTEGER DEFAULT 0, on_plexpyupdate INTEGER DEFAULT 0, "
-        "on_plexpydbcorrupt INTEGER DEFAULT 0, "
+        "on_concurrent INTEGER DEFAULT 0, on_newdevice INTEGER DEFAULT 0, "
+        "on_plexpyupdate INTEGER DEFAULT 0, on_plexpydbcorrupt INTEGER DEFAULT 0, "
+        "on_tokenexpired INTEGER DEFAULT 0, "
         "on_play_subject TEXT, on_stop_subject TEXT, on_pause_subject TEXT, "
         "on_resume_subject TEXT, on_change_subject TEXT, on_buffer_subject TEXT, on_error_subject TEXT, "
         "on_intro_subject TEXT, on_credits_subject TEXT, on_commercial_subject TEXT,"
         "on_watched_subject TEXT, on_created_subject TEXT, on_extdown_subject TEXT, on_intdown_subject TEXT, "
         "on_extup_subject TEXT, on_intup_subject TEXT, on_pmsupdate_subject TEXT, "
-        "on_concurrent_subject TEXT, on_newdevice_subject TEXT, on_plexpyupdate_subject TEXT, "
-        "on_plexpydbcorrupt_subject TEXT, "
+        "on_concurrent_subject TEXT, on_newdevice_subject TEXT, "
+        "on_plexpyupdate_subject TEXT, on_plexpydbcorrupt_subject TEXT, "
+        "on_tokenexpired_subject TEXT, "
         "on_play_body TEXT, on_stop_body TEXT, on_pause_body TEXT, "
         "on_resume_body TEXT, on_change_body TEXT, on_buffer_body TEXT, on_error_body TEXT, "
         "on_intro_body TEXT, on_credits_body TEXT, on_commercial_body TEXT, "
         "on_watched_body TEXT, on_created_body TEXT, on_extdown_body TEXT, on_intdown_body TEXT, "
         "on_extup_body TEXT, on_intup_body TEXT, on_pmsupdate_body TEXT, "
-        "on_concurrent_body TEXT, on_newdevice_body TEXT, on_plexpyupdate_body TEXT, "
-        "on_plexpydbcorrupt_body TEXT, "
+        "on_concurrent_body TEXT, on_newdevice_body TEXT, "
+        "on_plexpyupdate_body TEXT, on_plexpydbcorrupt_body TEXT, "
+        "on_tokenexpired_body TEXT, "
         "custom_conditions TEXT, custom_conditions_logic TEXT)"
     )
 
@@ -796,7 +824,7 @@ def dbcheck():
         "CREATE TABLE IF NOT EXISTS mobile_devices (id INTEGER PRIMARY KEY AUTOINCREMENT, "
         "device_id TEXT NOT NULL UNIQUE, device_token TEXT, device_name TEXT, "
         "platform TEXT, version TEXT, friendly_name TEXT, "
-        "onesignal_id TEXT, last_seen INTEGER, official INTEGER DEFAULT 0)"
+        "push_token TEXT, last_seen INTEGER, official INTEGER DEFAULT 0)"
     )
 
     # tvmaze_lookup table :: This table keeps record of the TVmaze lookups
@@ -845,7 +873,9 @@ def dbcheck():
         "timestamp INTEGER, section_id INTEGER, user_id INTEGER, rating_key INTEGER, media_type TEXT, "
         "title TEXT, file_format TEXT, "
         "metadata_level INTEGER, media_info_level INTEGER, "
-        "thumb_level INTEGER DEFAULT 0, art_level INTEGER DEFAULT 0, logo_level INTEGER DEFAULT 0, "
+        "thumb_level INTEGER DEFAULT 0, art_level INTEGER DEFAULT 0,"
+        "logo_level INTEGER DEFAULT 0, squareArt_level INTEGER DEFAULT 0, "
+        "theme_level INTEGER DEFAULT 0, "
         "custom_fields TEXT, individual_files INTEGER DEFAULT 0, "
         "file_size INTEGER DEFAULT 0, complete INTEGER DEFAULT 0, "
         "exported_items INTEGER DEFAULT 0, total_items INTEGER DEFAULT 0)"
@@ -855,7 +885,7 @@ def dbcheck():
     try:
         c_db.execute("SELECT started FROM sessions")
     except sqlite3.OperationalError:
-        logger.debug("Altering database. Updating database table sessions.")
+        logger.info("Altering database. Updating database table sessions.")
         c_db.execute(
             "ALTER TABLE sessions ADD COLUMN started INTEGER"
         )
@@ -876,7 +906,7 @@ def dbcheck():
     try:
         c_db.execute("SELECT title FROM sessions")
     except sqlite3.OperationalError:
-        logger.debug("Altering database. Updating database table sessions.")
+        logger.info("Altering database. Updating database table sessions.")
         c_db.execute(
             "ALTER TABLE sessions ADD COLUMN title TEXT"
         )
@@ -900,7 +930,7 @@ def dbcheck():
     try:
         c_db.execute("SELECT ip_address FROM sessions")
     except sqlite3.OperationalError:
-        logger.debug("Altering database. Updating database table sessions.")
+        logger.info("Altering database. Updating database table sessions.")
         c_db.execute(
             "ALTER TABLE sessions ADD COLUMN ip_address TEXT"
         )
@@ -981,7 +1011,7 @@ def dbcheck():
     try:
         c_db.execute("SELECT buffer_count FROM sessions")
     except sqlite3.OperationalError:
-        logger.debug("Altering database. Updating database table sessions.")
+        logger.info("Altering database. Updating database table sessions.")
         c_db.execute(
             "ALTER TABLE sessions ADD COLUMN buffer_count INTEGER DEFAULT 0"
         )
@@ -993,7 +1023,7 @@ def dbcheck():
     try:
         c_db.execute("SELECT last_paused FROM sessions")
     except sqlite3.OperationalError:
-        logger.debug("Altering database. Updating database table sessions.")
+        logger.info("Altering database. Updating database table sessions.")
         c_db.execute(
             "ALTER TABLE sessions ADD COLUMN last_paused INTEGER"
         )
@@ -1002,7 +1032,7 @@ def dbcheck():
     try:
         c_db.execute("SELECT section_id FROM sessions")
     except sqlite3.OperationalError:
-        logger.debug("Altering database. Updating database table sessions.")
+        logger.info("Altering database. Updating database table sessions.")
         c_db.execute(
             "ALTER TABLE sessions ADD COLUMN section_id INTEGER"
         )
@@ -1011,7 +1041,7 @@ def dbcheck():
     try:
         c_db.execute("SELECT stopped FROM sessions")
     except sqlite3.OperationalError:
-        logger.debug("Altering database. Updating database table sessions.")
+        logger.info("Altering database. Updating database table sessions.")
         c_db.execute(
             "ALTER TABLE sessions ADD COLUMN stopped INTEGER"
         )
@@ -1020,7 +1050,7 @@ def dbcheck():
     try:
         c_db.execute("SELECT transcode_key FROM sessions")
     except sqlite3.OperationalError:
-        logger.debug("Altering database. Updating database table sessions.")
+        logger.info("Altering database. Updating database table sessions.")
         c_db.execute(
             "ALTER TABLE sessions ADD COLUMN transcode_key TEXT"
         )
@@ -1029,7 +1059,7 @@ def dbcheck():
     try:
         c_db.execute("SELECT write_attempts FROM sessions")
     except sqlite3.OperationalError:
-        logger.debug("Altering database. Updating database table sessions.")
+        logger.info("Altering database. Updating database table sessions.")
         c_db.execute(
             "ALTER TABLE sessions ADD COLUMN write_attempts INTEGER DEFAULT 0"
         )
@@ -1038,7 +1068,7 @@ def dbcheck():
     try:
         c_db.execute("SELECT transcode_decision FROM sessions")
     except sqlite3.OperationalError:
-        logger.debug("Altering database. Updating database table sessions.")
+        logger.info("Altering database. Updating database table sessions.")
         c_db.execute(
             "ALTER TABLE sessions ADD COLUMN transcode_decision TEXT"
         )
@@ -1068,7 +1098,7 @@ def dbcheck():
     try:
         c_db.execute("SELECT raw_stream_info FROM sessions")
     except sqlite3.OperationalError:
-        logger.debug("Altering database. Updating database table sessions.")
+        logger.info("Altering database. Updating database table sessions.")
         c_db.execute(
             "ALTER TABLE sessions ADD COLUMN product TEXT"
         )
@@ -1158,7 +1188,7 @@ def dbcheck():
     try:
         c_db.execute("SELECT video_height FROM sessions")
     except sqlite3.OperationalError:
-        logger.debug("Altering database. Updating database table sessions.")
+        logger.info("Altering database. Updating database table sessions.")
         c_db.execute(
             "ALTER TABLE sessions ADD COLUMN video_height INTEGER"
         )
@@ -1167,7 +1197,7 @@ def dbcheck():
     try:
         c_db.execute("SELECT subtitles FROM sessions")
     except sqlite3.OperationalError:
-        logger.debug("Altering database. Updating database table sessions.")
+        logger.info("Altering database. Updating database table sessions.")
         c_db.execute(
             "ALTER TABLE sessions ADD COLUMN subtitles INTEGER"
         )
@@ -1176,7 +1206,7 @@ def dbcheck():
     try:
         c_db.execute("SELECT synced_version_profile FROM sessions")
     except sqlite3.OperationalError:
-        logger.debug("Altering database. Updating database table sessions.")
+        logger.info("Altering database. Updating database table sessions.")
         c_db.execute(
             "ALTER TABLE sessions ADD COLUMN synced_version_profile TEXT"
         )
@@ -1188,7 +1218,7 @@ def dbcheck():
     try:
         c_db.execute("SELECT transcode_hw_decoding FROM sessions")
     except sqlite3.OperationalError:
-        logger.debug("Altering database. Updating database table sessions.")
+        logger.info("Altering database. Updating database table sessions.")
         c_db.execute(
             "ALTER TABLE sessions ADD COLUMN transcode_hw_decoding INTEGER"
         )
@@ -1200,7 +1230,7 @@ def dbcheck():
     try:
         c_db.execute("SELECT watched FROM sessions")
     except sqlite3.OperationalError:
-        logger.debug("Altering database. Updating database table sessions.")
+        logger.info("Altering database. Updating database table sessions.")
         c_db.execute(
             "ALTER TABLE sessions ADD COLUMN watched INTEGER DEFAULT 0"
         )
@@ -1209,7 +1239,7 @@ def dbcheck():
     try:
         c_db.execute("SELECT live FROM sessions")
     except sqlite3.OperationalError:
-        logger.debug("Altering database. Updating database table sessions.")
+        logger.info("Altering database. Updating database table sessions.")
         c_db.execute(
             "ALTER TABLE sessions ADD COLUMN live INTEGER"
         )
@@ -1221,7 +1251,7 @@ def dbcheck():
     try:
         c_db.execute("SELECT session_id FROM sessions")
     except sqlite3.OperationalError:
-        logger.debug("Altering database. Updating database table sessions.")
+        logger.info("Altering database. Updating database table sessions.")
         c_db.execute(
             "ALTER TABLE sessions ADD COLUMN session_id TEXT"
         )
@@ -1230,7 +1260,7 @@ def dbcheck():
     try:
         c_db.execute("SELECT original_title FROM sessions")
     except sqlite3.OperationalError:
-        logger.debug("Altering database. Updating database table sessions.")
+        logger.info("Altering database. Updating database table sessions.")
         c_db.execute(
             "ALTER TABLE sessions ADD COLUMN original_title TEXT"
         )
@@ -1239,7 +1269,7 @@ def dbcheck():
     try:
         c_db.execute("SELECT secure FROM sessions")
     except sqlite3.OperationalError:
-        logger.debug("Altering database. Updating database table sessions.")
+        logger.info("Altering database. Updating database table sessions.")
         c_db.execute(
             "ALTER TABLE sessions ADD COLUMN secure INTEGER"
         )
@@ -1251,7 +1281,7 @@ def dbcheck():
     try:
         c_db.execute("SELECT rating_key_websocket FROM sessions")
     except sqlite3.OperationalError:
-        logger.debug("Altering database. Updating database table sessions.")
+        logger.info("Altering database. Updating database table sessions.")
         c_db.execute(
             "ALTER TABLE sessions ADD COLUMN rating_key_websocket TEXT"
         )
@@ -1260,7 +1290,7 @@ def dbcheck():
     try:
         c_db.execute("SELECT video_scan_type FROM sessions")
     except sqlite3.OperationalError:
-        logger.debug("Altering database. Updating database table sessions.")
+        logger.info("Altering database. Updating database table sessions.")
         c_db.execute(
             "ALTER TABLE sessions ADD COLUMN video_scan_type TEXT"
         )
@@ -1278,7 +1308,7 @@ def dbcheck():
     try:
         c_db.execute("SELECT video_dynamic_range FROM sessions")
     except sqlite3.OperationalError:
-        logger.debug("Altering database. Updating database table sessions.")
+        logger.info("Altering database. Updating database table sessions.")
         c_db.execute(
             "ALTER TABLE sessions ADD COLUMN video_dynamic_range TEXT"
         )
@@ -1290,7 +1320,7 @@ def dbcheck():
     try:
         c_db.execute("SELECT channel_identifier FROM sessions")
     except sqlite3.OperationalError:
-        logger.debug("Altering database. Updating database table sessions.")
+        logger.info("Altering database. Updating database table sessions.")
         c_db.execute(
             "ALTER TABLE sessions ADD COLUMN channel_call_sign TEXT"
         )
@@ -1305,7 +1335,7 @@ def dbcheck():
     try:
         c_db.execute("SELECT originally_available_at FROM sessions")
     except sqlite3.OperationalError:
-        logger.debug("Altering database. Updating database table sessions.")
+        logger.info("Altering database. Updating database table sessions.")
         c_db.execute(
             "ALTER TABLE sessions ADD COLUMN originally_available_at TEXT"
         )
@@ -1317,7 +1347,7 @@ def dbcheck():
     try:
         c_db.execute("SELECT guid FROM sessions")
     except sqlite3.OperationalError:
-        logger.debug("Altering database. Updating database table sessions.")
+        logger.info("Altering database. Updating database table sessions.")
         c_db.execute(
             "ALTER TABLE sessions ADD COLUMN guid TEXT"
         )
@@ -1326,7 +1356,7 @@ def dbcheck():
     try:
         c_db.execute("SELECT bandwidth FROM sessions")
     except sqlite3.OperationalError:
-        logger.debug(u"Altering database. Updating database table sessions.")
+        logger.info(u"Altering database. Updating database table sessions.")
         c_db.execute(
             "ALTER TABLE sessions ADD COLUMN bandwidth INTEGER"
         )
@@ -1338,7 +1368,7 @@ def dbcheck():
     try:
         c_db.execute("SELECT initial_stream FROM sessions")
     except sqlite3.OperationalError:
-        logger.debug(u"Altering database. Updating database table sessions.")
+        logger.info(u"Altering database. Updating database table sessions.")
         c_db.execute(
             "ALTER TABLE sessions ADD COLUMN initial_stream INTEGER DEFAULT 1"
         )
@@ -1347,7 +1377,7 @@ def dbcheck():
     try:
         c_db.execute("SELECT audio_language FROM sessions")
     except sqlite3.OperationalError:
-        logger.debug(u"Altering database. Updating database table sessions.")
+        logger.info(u"Altering database. Updating database table sessions.")
         c_db.execute(
             "ALTER TABLE sessions ADD COLUMN audio_language TEXT"
         )
@@ -1365,7 +1395,7 @@ def dbcheck():
     try:
         c_db.execute("SELECT subtitle_language FROM sessions")
     except sqlite3.OperationalError:
-        logger.debug(u"Altering database. Updating database table sessions.")
+        logger.info(u"Altering database. Updating database table sessions.")
         c_db.execute(
             "ALTER TABLE sessions ADD COLUMN subtitle_language TEXT"
         )
@@ -1377,7 +1407,7 @@ def dbcheck():
     try:
         c_db.execute("SELECT subtitle_forced FROM sessions")
     except sqlite3.OperationalError:
-        logger.debug(u"Altering database. Updating database table sessions.")
+        logger.info(u"Altering database. Updating database table sessions.")
         c_db.execute(
             "ALTER TABLE sessions ADD COLUMN subtitle_forced INTEGER"
         )
@@ -1389,7 +1419,7 @@ def dbcheck():
     try:
         c_db.execute("SELECT intro FROM sessions")
     except sqlite3.OperationalError:
-        logger.debug(u"Altering database. Updating database table sessions.")
+        logger.info(u"Altering database. Updating database table sessions.")
         c_db.execute(
             "ALTER TABLE sessions ADD COLUMN intro INTEGER DEFAULT 0"
         )
@@ -1401,7 +1431,7 @@ def dbcheck():
     try:
         c_db.execute("SELECT commercial FROM sessions")
     except sqlite3.OperationalError:
-        logger.debug(u"Altering database. Updating database table sessions.")
+        logger.info(u"Altering database. Updating database table sessions.")
         c_db.execute(
             "ALTER TABLE sessions ADD COLUMN commercial INTEGER DEFAULT 0"
         )
@@ -1410,7 +1440,7 @@ def dbcheck():
     try:
         c_db.execute("SELECT marker FROM sessions")
     except sqlite3.OperationalError:
-        logger.debug(u"Altering database. Updating database table sessions.")
+        logger.info(u"Altering database. Updating database table sessions.")
         c_db.execute(
             "ALTER TABLE sessions ADD COLUMN marker INTEGER DEFAULT 0"
         )
@@ -1419,7 +1449,7 @@ def dbcheck():
     try:
         c_db.execute("SELECT channel_id FROM sessions")
     except sqlite3.OperationalError:
-        logger.debug("Altering database. Updating database table sessions.")
+        logger.info("Altering database. Updating database table sessions.")
         c_db.execute(
             "ALTER TABLE sessions ADD COLUMN channel_id TEXT"
         )
@@ -1434,7 +1464,7 @@ def dbcheck():
     try:
         c_db.execute("SELECT reference_id FROM session_history")
     except sqlite3.OperationalError:
-        logger.debug("Altering database. Updating database table session_history.")
+        logger.info("Altering database. Updating database table session_history.")
         c_db.execute(
             "ALTER TABLE session_history ADD COLUMN reference_id INTEGER DEFAULT 0"
         )
@@ -1457,7 +1487,7 @@ def dbcheck():
     try:
         c_db.execute("SELECT bandwidth FROM session_history")
     except sqlite3.OperationalError:
-        logger.debug("Altering database. Updating database table session_history.")
+        logger.info("Altering database. Updating database table session_history.")
         c_db.execute(
             "ALTER TABLE session_history ADD COLUMN platform_version TEXT"
         )
@@ -1484,7 +1514,7 @@ def dbcheck():
     try:
         c_db.execute("SELECT secure FROM session_history")
     except sqlite3.OperationalError:
-        logger.debug("Altering database. Updating database table session_history.")
+        logger.info("Altering database. Updating database table session_history.")
         c_db.execute(
             "ALTER TABLE session_history ADD COLUMN secure INTEGER"
         )
@@ -1497,7 +1527,7 @@ def dbcheck():
         result = c_db.execute("SELECT platform FROM session_history "
                               "WHERE platform = 'windows'").fetchall()
         if len(result) > 0:
-            logger.debug("Altering database. Capitalizing Windows platform values in session_history table.")
+            logger.info("Altering database. Capitalizing Windows platform values in session_history table.")
             c_db.execute(
                 "UPDATE session_history SET platform = 'Windows' WHERE platform = 'windows' "
             )
@@ -1509,7 +1539,7 @@ def dbcheck():
         result = c_db.execute("SELECT platform FROM session_history "
                               "WHERE platform = 'macos'").fetchall()
         if len(result) > 0:
-            logger.debug("Altering database. Capitalizing macOS platform values in session_history table.")
+            logger.info("Altering database. Capitalizing macOS platform values in session_history table.")
             c_db.execute(
                 "UPDATE session_history SET platform = 'macOS' WHERE platform = 'macos' "
             )
@@ -1520,7 +1550,7 @@ def dbcheck():
     try:
         c_db.execute("SELECT full_title FROM session_history_metadata")
     except sqlite3.OperationalError:
-        logger.debug("Altering database. Updating database table session_history_metadata.")
+        logger.info("Altering database. Updating database table session_history_metadata.")
         c_db.execute(
             "ALTER TABLE session_history_metadata ADD COLUMN full_title TEXT"
         )
@@ -1529,7 +1559,7 @@ def dbcheck():
     try:
         c_db.execute("SELECT tagline FROM session_history_metadata")
     except sqlite3.OperationalError:
-        logger.debug("Altering database. Updating database table session_history_metadata.")
+        logger.info("Altering database. Updating database table session_history_metadata.")
         c_db.execute(
             "ALTER TABLE session_history_metadata ADD COLUMN tagline TEXT"
         )
@@ -1538,7 +1568,7 @@ def dbcheck():
     try:
         c_db.execute("SELECT labels FROM session_history_metadata")
     except sqlite3.OperationalError:
-        logger.debug("Altering database. Updating database table session_history_metadata.")
+        logger.info("Altering database. Updating database table session_history_metadata.")
         c_db.execute(
             "ALTER TABLE session_history_metadata ADD COLUMN labels TEXT"
         )
@@ -1547,7 +1577,7 @@ def dbcheck():
     try:
         c_db.execute("SELECT original_title FROM session_history_metadata")
     except sqlite3.OperationalError:
-        logger.debug("Altering database. Updating database table session_history_metadata.")
+        logger.info("Altering database. Updating database table session_history_metadata.")
         c_db.execute(
             "ALTER TABLE session_history_metadata ADD COLUMN original_title TEXT"
         )
@@ -1556,7 +1586,7 @@ def dbcheck():
     try:
         c_db.execute("SELECT live FROM session_history_metadata")
     except sqlite3.OperationalError:
-        logger.debug("Altering database. Updating database table session_history_metadata.")
+        logger.info("Altering database. Updating database table session_history_metadata.")
         c_db.execute(
             "ALTER TABLE session_history_metadata ADD COLUMN live INTEGER DEFAULT 0"
         )
@@ -1574,7 +1604,7 @@ def dbcheck():
     try:
         c_db.execute("SELECT marker_credits_first FROM session_history_metadata")
     except sqlite3.OperationalError:
-        logger.debug("Altering database. Updating database table session_history_metadata.")
+        logger.info("Altering database. Updating database table session_history_metadata.")
         c_db.execute(
             "ALTER TABLE session_history_metadata ADD COLUMN marker_credits_first INTEGER DEFAULT NULL"
         )
@@ -1586,7 +1616,7 @@ def dbcheck():
     try:
         c_db.execute("SELECT channel_id FROM session_history_metadata")
     except sqlite3.OperationalError:
-        logger.debug("Altering database. Updating database table session_history_metadata.")
+        logger.info("Altering database. Updating database table session_history_metadata.")
         c_db.execute(
             "ALTER TABLE session_history_metadata ADD COLUMN channel_id TEXT"
         )
@@ -1601,7 +1631,7 @@ def dbcheck():
     try:
         c_db.execute("SELECT transcode_decision FROM session_history_media_info")
     except sqlite3.OperationalError:
-        logger.debug("Altering database. Updating database table session_history_media_info.")
+        logger.info("Altering database. Updating database table session_history_media_info.")
         c_db.execute(
             "ALTER TABLE session_history_media_info ADD COLUMN transcode_decision TEXT"
         )
@@ -1616,7 +1646,7 @@ def dbcheck():
     try:
         c_db.execute("SELECT subtitles FROM session_history_media_info")
     except sqlite3.OperationalError:
-        logger.debug("Altering database. Updating database table session_history_media_info.")
+        logger.info("Altering database. Updating database table session_history_media_info.")
         c_db.execute(
             "ALTER TABLE session_history_media_info ADD COLUMN video_bit_depth INTEGER"
         )
@@ -1736,7 +1766,7 @@ def dbcheck():
     try:
         c_db.execute("SELECT subtitle_codec FROM session_history_media_info")
     except sqlite3.OperationalError:
-        logger.debug("Altering database. Updating database table session_history_media_info.")
+        logger.info("Altering database. Updating database table session_history_media_info.")
         c_db.execute(
             "ALTER TABLE session_history_media_info ADD COLUMN subtitle_codec TEXT"
         )
@@ -1745,7 +1775,7 @@ def dbcheck():
     try:
         c_db.execute("SELECT synced_version_profile FROM session_history_media_info")
     except sqlite3.OperationalError:
-        logger.debug("Altering database. Updating database table session_history_media_info.")
+        logger.info("Altering database. Updating database table session_history_media_info.")
         c_db.execute(
             "ALTER TABLE session_history_media_info ADD COLUMN synced_version_profile TEXT"
         )
@@ -1757,7 +1787,7 @@ def dbcheck():
     try:
         c_db.execute("SELECT transcode_hw_decoding FROM session_history_media_info")
     except sqlite3.OperationalError:
-        logger.debug("Altering database. Updating database table session_history_media_info.")
+        logger.info("Altering database. Updating database table session_history_media_info.")
         c_db.execute(
             "ALTER TABLE session_history_media_info ADD COLUMN transcode_hw_decoding INTEGER"
         )
@@ -1773,7 +1803,7 @@ def dbcheck():
         result = c_db.execute("SELECT stream_container FROM session_history_media_info "
                               "WHERE stream_container IS NULL").fetchall()
         if len(result) > 0:
-            logger.debug("Altering database. Removing NULL values from session_history_media_info table.")
+            logger.info("Altering database. Removing NULL values from session_history_media_info table.")
             c_db.execute(
                 "UPDATE session_history_media_info SET stream_container = '' WHERE stream_container IS NULL"
             )
@@ -1793,7 +1823,7 @@ def dbcheck():
     try:
         c_db.execute("SELECT video_scan_type FROM session_history_media_info")
     except sqlite3.OperationalError:
-        logger.debug("Altering database. Updating database table session_history_media_info.")
+        logger.info("Altering database. Updating database table session_history_media_info.")
         c_db.execute(
             "ALTER TABLE session_history_media_info ADD COLUMN video_scan_type TEXT"
         )
@@ -1832,7 +1862,7 @@ def dbcheck():
     try:
         c_db.execute("SELECT video_dynamic_range FROM session_history_media_info")
     except sqlite3.OperationalError:
-        logger.debug("Altering database. Updating database table session_history_media_info.")
+        logger.info("Altering database. Updating database table session_history_media_info.")
         c_db.execute(
             "ALTER TABLE session_history_media_info ADD COLUMN video_dynamic_range TEXT"
         )
@@ -1852,7 +1882,7 @@ def dbcheck():
     try:
         c_db.execute("SELECT audio_language FROM session_history_media_info")
     except sqlite3.OperationalError:
-        logger.debug("Altering database. Updating database table session_history_media_info.")
+        logger.info("Altering database. Updating database table session_history_media_info.")
         c_db.execute(
             "ALTER TABLE session_history_media_info ADD COLUMN audio_language TEXT"
         )
@@ -1870,7 +1900,7 @@ def dbcheck():
     try:
         c_db.execute("SELECT subtitle_language FROM session_history_media_info")
     except sqlite3.OperationalError:
-        logger.debug("Altering database. Updating database table session_history_media_info.")
+        logger.info("Altering database. Updating database table session_history_media_info.")
         c_db.execute(
             "ALTER TABLE session_history_media_info ADD COLUMN subtitle_language TEXT"
         )
@@ -1882,16 +1912,48 @@ def dbcheck():
     try:
         c_db.execute("SELECT subtitle_forced FROM session_history_media_info")
     except sqlite3.OperationalError:
-        logger.debug("Altering database. Updating database table session_history_media_info.")
+        logger.info("Altering database. Updating database table session_history_media_info.")
         c_db.execute(
             "ALTER TABLE session_history_media_info ADD COLUMN subtitle_forced INTEGER"
+        )
+
+    # Upgrade session_history table from earlier versions.
+    #
+    # Read the schema rather than a column, because a failed read says
+    # only that the read failed. A locked database and a bad disk raise
+    # the same error a missing column does.
+    session_history_columns = {
+        column[1] for column in c_db.execute("PRAGMA table_info(session_history)")
+    }
+    missing_columns = {'live', 'transcode_decision'} - session_history_columns
+
+    if missing_columns:
+        # The history table filters on these two, which used to live only
+        # in the side tables. Filtering on them read a wide side-table row
+        # for every history row. They are written once with the row and
+        # never updated, the same way section_id already is.
+        logger.info("Altering database. Updating database table session_history.")
+        if 'live' in missing_columns:
+            c_db.execute(
+                "ALTER TABLE session_history ADD COLUMN live INTEGER DEFAULT 0"
+            )
+        if 'transcode_decision' in missing_columns:
+            c_db.execute(
+                "ALTER TABLE session_history ADD COLUMN transcode_decision TEXT"
+            )
+        c_db.execute(
+            "UPDATE session_history SET "
+            "live = COALESCE((SELECT live FROM session_history_metadata "
+            "WHERE session_history_metadata.id = session_history.id), 0), "
+            "transcode_decision = (SELECT transcode_decision FROM session_history_media_info "
+            "WHERE session_history_media_info.id = session_history.id)"
         )
 
     # Upgrade session_history table from earlier versions
     try:
         c_db.execute("SELECT section_id FROM session_history")
     except sqlite3.OperationalError:
-        logger.debug("Altering database. Updating database table session_history.")
+        logger.info("Altering database. Updating database table session_history.")
         c_db.execute(
             "ALTER TABLE session_history ADD COLUMN section_id INTEGER"
         )
@@ -1941,7 +2003,7 @@ def dbcheck():
     try:
         c_db.execute("SELECT do_notify FROM users")
     except sqlite3.OperationalError:
-        logger.debug("Altering database. Updating database table users.")
+        logger.info("Altering database. Updating database table users.")
         c_db.execute(
             "ALTER TABLE users ADD COLUMN do_notify INTEGER DEFAULT 1"
         )
@@ -1950,7 +2012,7 @@ def dbcheck():
     try:
         c_db.execute("SELECT keep_history FROM users")
     except sqlite3.OperationalError:
-        logger.debug("Altering database. Updating database table users.")
+        logger.info("Altering database. Updating database table users.")
         c_db.execute(
             "ALTER TABLE users ADD COLUMN keep_history INTEGER DEFAULT 1"
         )
@@ -1959,7 +2021,7 @@ def dbcheck():
     try:
         c_db.execute("SELECT custom_avatar_url FROM users")
     except sqlite3.OperationalError:
-        logger.debug("Altering database. Updating database table users.")
+        logger.info("Altering database. Updating database table users.")
         c_db.execute(
             "ALTER TABLE users ADD COLUMN custom_avatar_url TEXT"
         )
@@ -1968,16 +2030,25 @@ def dbcheck():
     try:
         c_db.execute("SELECT deleted_user FROM users")
     except sqlite3.OperationalError:
-        logger.debug("Altering database. Updating database table users.")
+        logger.info("Altering database. Updating database table users.")
         c_db.execute(
             "ALTER TABLE users ADD COLUMN deleted_user INTEGER DEFAULT 0"
         )
 
     # Upgrade users table from earlier versions
     try:
+        c_db.execute("SELECT is_archived FROM users")
+    except sqlite3.OperationalError:
+        logger.info("Altering database. Updating database table users.")
+        c_db.execute(
+            "ALTER TABLE users ADD COLUMN is_archived INTEGER DEFAULT 0"
+        )
+
+    # Upgrade users table from earlier versions
+    try:
         c_db.execute("SELECT allow_guest FROM users")
     except sqlite3.OperationalError:
-        logger.debug("Altering database. Updating database table users.")
+        logger.info("Altering database. Updating database table users.")
         c_db.execute(
             "ALTER TABLE users ADD COLUMN allow_guest INTEGER DEFAULT 0"
         )
@@ -1992,7 +2063,7 @@ def dbcheck():
     try:
         c_db.execute("SELECT shared_libraries FROM users")
     except sqlite3.OperationalError:
-        logger.debug("Altering database. Updating database table users.")
+        logger.info("Altering database. Updating database table users.")
         c_db.execute(
             "ALTER TABLE users ADD COLUMN shared_libraries TEXT"
         )
@@ -2016,7 +2087,7 @@ def dbcheck():
     try:
         c_db.execute("SELECT is_admin FROM users")
     except sqlite3.OperationalError:
-        logger.debug("Altering database. Updating database table users.")
+        logger.info("Altering database. Updating database table users.")
         c_db.execute(
             "ALTER TABLE users ADD COLUMN is_admin INTEGER DEFAULT 0"
         )
@@ -2025,7 +2096,7 @@ def dbcheck():
     try:
         c_db.execute("SELECT is_active FROM users")
     except sqlite3.OperationalError:
-        logger.debug("Altering database. Updating database table users.")
+        logger.info("Altering database. Updating database table users.")
         c_db.execute(
             "ALTER TABLE users ADD COLUMN is_active INTEGER DEFAULT 1"
         )
@@ -2034,7 +2105,7 @@ def dbcheck():
     try:
         c_db.execute("SELECT title FROM users")
     except sqlite3.OperationalError:
-        logger.debug("Altering database. Updating database table users.")
+        logger.info("Altering database. Updating database table users.")
         c_db.execute(
             "ALTER TABLE users ADD COLUMN title TEXT"
         )
@@ -2042,7 +2113,7 @@ def dbcheck():
     try:
         result = c_db.execute("SELECT * FROM users WHERE friendly_name = username").fetchall()
         if result:
-            logger.debug("Altering database. Resetting user friendly names equal to username.")
+            logger.info("Altering database. Resetting user friendly names equal to username.")
             c_db.execute("UPDATE users SET friendly_name = NULL WHERE friendly_name = username")
     except sqlite3.OperationalError:
        pass
@@ -2051,7 +2122,7 @@ def dbcheck():
     try:
         c_db.execute("SELECT poster_url FROM notify_log")
     except sqlite3.OperationalError:
-        logger.debug("Altering database. Updating database table notify_log.")
+        logger.info("Altering database. Updating database table notify_log.")
         c_db.execute(
             "ALTER TABLE notify_log ADD COLUMN poster_url TEXT"
         )
@@ -2060,7 +2131,7 @@ def dbcheck():
     try:
         c_db.execute("SELECT timestamp FROM notify_log")
     except sqlite3.OperationalError:
-        logger.debug("Altering database. Updating database table notify_log.")
+        logger.info("Altering database. Updating database table notify_log.")
         c_db.execute(
             "CREATE TABLE IF NOT EXISTS notify_log_temp (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp INTEGER, "
             "session_key INTEGER, rating_key INTEGER, parent_rating_key INTEGER, grandparent_rating_key INTEGER, "
@@ -2098,7 +2169,7 @@ def dbcheck():
     try:
         c_db.execute("SELECT notifier_id FROM notify_log")
     except sqlite3.OperationalError:
-        logger.debug("Altering database. Updating database table notify_log.")
+        logger.info("Altering database. Updating database table notify_log.")
         c_db.execute(
             "ALTER TABLE notify_log ADD COLUMN notifier_id INTEGER"
         )
@@ -2107,7 +2178,7 @@ def dbcheck():
     try:
         c_db.execute("SELECT success FROM notify_log")
     except sqlite3.OperationalError:
-        logger.debug("Altering database. Updating database table notify_log.")
+        logger.info("Altering database. Updating database table notify_log.")
         c_db.execute(
             "ALTER TABLE notify_log ADD COLUMN success INTEGER DEFAULT 0"
         )
@@ -2119,7 +2190,7 @@ def dbcheck():
     try:
         c_db.execute("SELECT tag FROM notify_log")
     except sqlite3.OperationalError:
-        logger.debug("Altering database. Updating database table notify_log.")
+        logger.info("Altering database. Updating database table notify_log.")
         c_db.execute(
             "ALTER TABLE notify_log ADD COLUMN tag TEXT"
         )
@@ -2128,7 +2199,7 @@ def dbcheck():
     try:
         c_db.execute("SELECT start_time FROM newsletter_log")
     except sqlite3.OperationalError:
-        logger.debug("Altering database. Updating database table newsletter_log.")
+        logger.info("Altering database. Updating database table newsletter_log.")
         c_db.execute(
             "ALTER TABLE newsletter_log ADD COLUMN start_time INTEGER"
         )
@@ -2140,7 +2211,7 @@ def dbcheck():
     try:
         c_db.execute("SELECT filename FROM newsletter_log")
     except sqlite3.OperationalError:
-        logger.debug("Altering database. Updating database table newsletter_log.")
+        logger.info("Altering database. Updating database table newsletter_log.")
         c_db.execute(
             "ALTER TABLE newsletter_log ADD COLUMN filename TEXT"
         )
@@ -2149,7 +2220,7 @@ def dbcheck():
     try:
         c_db.execute("SELECT email_msg_id FROM newsletter_log")
     except sqlite3.OperationalError:
-        logger.debug("Altering database. Updating database table newsletter_log.")
+        logger.info("Altering database. Updating database table newsletter_log.")
         c_db.execute(
             "ALTER TABLE newsletter_log ADD COLUMN email_msg_id TEXT"
         )
@@ -2158,7 +2229,7 @@ def dbcheck():
     try:
         c_db.execute("SELECT id_name FROM newsletters")
     except sqlite3.OperationalError:
-        logger.debug("Altering database. Updating database table newsletters.")
+        logger.info("Altering database. Updating database table newsletters.")
         c_db.execute(
             "ALTER TABLE newsletters ADD COLUMN id_name TEXT NOT NULL"
         )
@@ -2167,7 +2238,7 @@ def dbcheck():
     try:
         result = c_db.execute("SELECT SQL FROM sqlite_master WHERE type='table' AND name='newsletters'").fetchone()
         if "TEXT NOT NULL DEFAULT \"0 0 * * 0\"" in result[0]:
-            logger.debug("Altering database. Updating default cron value in newsletters table.")
+            logger.info("Altering database. Updating default cron value in newsletters table.")
             c_db.execute(
                 "CREATE TABLE newsletters_temp (id INTEGER PRIMARY KEY AUTOINCREMENT, "
                 "agent_id INTEGER, agent_name TEXT, agent_label TEXT, id_name TEXT NOT NULL, "
@@ -2201,7 +2272,7 @@ def dbcheck():
     try:
         result = c_db.execute("SELECT SQL FROM sqlite_master WHERE type='table' AND name='library_sections'").fetchone()
         if "section_id INTEGER UNIQUE" in result[0]:
-            logger.debug("Altering database. Removing unique constraint on section_id from library_sections table.")
+            logger.info("Altering database. Removing unique constraint on section_id from library_sections table.")
             c_db.execute(
                 "CREATE TABLE library_sections_temp (id INTEGER PRIMARY KEY AUTOINCREMENT, "
                 "server_id TEXT, section_id INTEGER, section_name TEXT, section_type TEXT, "
@@ -2237,7 +2308,7 @@ def dbcheck():
     try:
         result = c_db.execute("SELECT * FROM library_sections WHERE server_id = ''").fetchall()
         if len(result) > 0:
-            logger.debug("Altering database. Removing duplicate libraries from library_sections table.")
+            logger.info("Altering database. Removing duplicate libraries from library_sections table.")
             c_db.execute(
                 "DELETE FROM library_sections WHERE server_id = ''"
             )
@@ -2248,7 +2319,7 @@ def dbcheck():
     try:
         c_db.execute("SELECT agent FROM library_sections")
     except sqlite3.OperationalError:
-        logger.debug("Altering database. Updating database table library_sections.")
+        logger.info("Altering database. Updating database table library_sections.")
         c_db.execute(
             "ALTER TABLE library_sections ADD COLUMN agent TEXT"
         )
@@ -2257,7 +2328,7 @@ def dbcheck():
     try:
         c_db.execute("SELECT custom_art_url FROM library_sections")
     except sqlite3.OperationalError:
-        logger.debug("Altering database. Updating database table library_sections.")
+        logger.info("Altering database. Updating database table library_sections.")
         c_db.execute(
             "ALTER TABLE library_sections ADD COLUMN custom_art_url TEXT"
         )
@@ -2266,9 +2337,18 @@ def dbcheck():
     try:
         c_db.execute("SELECT is_active FROM library_sections")
     except sqlite3.OperationalError:
-        logger.debug("Altering database. Updating database table library_sections.")
+        logger.info("Altering database. Updating database table library_sections.")
         c_db.execute(
             "ALTER TABLE library_sections ADD COLUMN is_active INTEGER DEFAULT 1"
+        )
+
+    # Upgrade library_sections table from earlier versions
+    try:
+        c_db.execute("SELECT is_archived FROM library_sections")
+    except sqlite3.OperationalError:
+        logger.info("Altering database. Updating database table library_sections.")
+        c_db.execute(
+            "ALTER TABLE library_sections ADD COLUMN is_archived INTEGER DEFAULT 0"
         )
 
     # Upgrade library_sections table from earlier versions
@@ -2276,7 +2356,7 @@ def dbcheck():
         result = c_db.execute("SELECT thumb, art FROM library_sections WHERE section_id = ?",
                               [common.LIVE_TV_SECTION_ID]).fetchone()
         if result and (not result[0] or not result[1]):
-            logger.debug("Altering database. Updating database table library_sections.")
+            logger.info("Altering database. Updating database table library_sections.")
             c_db.execute("UPDATE library_sections SET thumb = ?, art =? WHERE section_id = ?",
                          [common.DEFAULT_LIVE_TV_THUMB,
                           common.DEFAULT_LIVE_TV_ART_FULL,
@@ -2288,7 +2368,7 @@ def dbcheck():
     try:
         result = c_db.execute("SELECT SQL FROM sqlite_master WHERE type='table' AND name='users'").fetchone()
         if "username TEXT NOT NULL UNIQUE" in result[0]:
-            logger.debug("Altering database. Removing unique constraint on username from users table.")
+            logger.info("Altering database. Removing unique constraint on username from users table.")
             c_db.execute(
                 "CREATE TABLE users_temp (id INTEGER PRIMARY KEY AUTOINCREMENT, "
                 "user_id INTEGER DEFAULT NULL UNIQUE, username TEXT NOT NULL, friendly_name TEXT, "
@@ -2322,7 +2402,7 @@ def dbcheck():
     try:
         result = c_db.execute("SELECT SQL FROM sqlite_master WHERE type='table' AND name='mobile_devices'").fetchone()
         if "device_token TEXT NOT NULL UNIQUE" in result[0]:
-            logger.debug("Altering database. Dropping and recreating mobile_devices table.")
+            logger.info("Altering database. Dropping and recreating mobile_devices table.")
             c_db.execute(
                 "DROP TABLE mobile_devices"
             )
@@ -2338,7 +2418,7 @@ def dbcheck():
     try:
         c_db.execute("SELECT last_seen FROM mobile_devices")
     except sqlite3.OperationalError:
-        logger.debug("Altering database. Updating database table mobile_devices.")
+        logger.info("Altering database. Updating database table mobile_devices.")
         c_db.execute(
             "ALTER TABLE mobile_devices ADD COLUMN last_seen INTEGER"
         )
@@ -2347,29 +2427,16 @@ def dbcheck():
     try:
         c_db.execute("SELECT official FROM mobile_devices")
     except sqlite3.OperationalError:
-        logger.debug("Altering database. Updating database table mobile_devices.")
+        logger.info("Altering database. Updating database table mobile_devices.")
         c_db.execute(
             "ALTER TABLE mobile_devices ADD COLUMN official INTEGER DEFAULT 0"
-        )
-        # Update official mobile device flag
-        for device_id, in c_db.execute("SELECT device_id FROM mobile_devices").fetchall():
-            c_db.execute("UPDATE mobile_devices SET official = ? WHERE device_id = ?",
-                         [mobile_app.validate_onesignal_id(device_id), device_id])
-
-    # Upgrade mobile_devices table from earlier versions
-    try:
-        c_db.execute("SELECT onesignal_id FROM mobile_devices")
-    except sqlite3.OperationalError:
-        logger.debug("Altering database. Updating database table mobile_devices.")
-        c_db.execute(
-            "ALTER TABLE mobile_devices ADD COLUMN onesignal_id TEXT"
         )
 
     # Upgrade mobile_devices table from earlier versions
     try:
         c_db.execute("SELECT platform FROM mobile_devices")
     except sqlite3.OperationalError:
-        logger.debug("Altering database. Updating database table mobile_devices.")
+        logger.info("Altering database. Updating database table mobile_devices.")
         c_db.execute(
             "ALTER TABLE mobile_devices ADD COLUMN platform TEXT"
         )
@@ -2382,11 +2449,50 @@ def dbcheck():
             c_db.execute("UPDATE mobile_devices SET platform = ? WHERE device_id = ?",
                          ["android", device_id])
 
+    # Upgrade mobile_devices table from earlier versions
+    try:
+        c_db.execute("SELECT push_token FROM mobile_devices")
+    except sqlite3.OperationalError:
+        logger.info("Altering database. Updating database table mobile_devices.")
+        c_db.execute(
+            "ALTER TABLE mobile_devices ADD COLUMN push_token TEXT"
+        )
+
+    # Upgrade mobile_devices table from earlier versions (remove onesignal_id)
+    try:
+        result = c_db.execute("SELECT SQL FROM sqlite_master WHERE type='table' AND name='mobile_devices'").fetchone()
+        if "onesignal_id" in result[0]:
+            logger.info("Altering database. Removing onesignal_id from mobile_devices table.")
+            c_db.execute(
+                "DROP TABLE IF EXISTS mobile_devices_temp"
+            )
+            c_db.execute(
+                "CREATE TABLE mobile_devices_temp (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+                "device_id TEXT NOT NULL UNIQUE, device_token TEXT, device_name TEXT, "
+                "platform TEXT, version TEXT, friendly_name TEXT, "
+                "push_token TEXT, last_seen INTEGER, official INTEGER DEFAULT 0)"
+            )
+            c_db.execute(
+                "INSERT INTO mobile_devices_temp (id, device_id, device_token, device_name, platform, version, "
+                "friendly_name, push_token, last_seen, official) "
+                "SELECT id, device_id, device_token, device_name, platform, version, "
+                "friendly_name, push_token, last_seen, official "
+                "FROM mobile_devices"
+            )
+            c_db.execute(
+                "DROP TABLE mobile_devices"
+            )
+            c_db.execute(
+                "ALTER TABLE mobile_devices_temp RENAME TO mobile_devices"
+            )
+    except sqlite3.OperationalError:
+        logger.warn("Unable to remove onesignal_id from mobile_devices.")
+
     # Upgrade notifiers table from earlier versions
     try:
         c_db.execute("SELECT custom_conditions FROM notifiers")
     except sqlite3.OperationalError:
-        logger.debug("Altering database. Updating database table notifiers.")
+        logger.info("Altering database. Updating database table notifiers.")
         c_db.execute(
             "ALTER TABLE notifiers ADD COLUMN custom_conditions TEXT"
         )
@@ -2398,7 +2504,7 @@ def dbcheck():
     try:
         c_db.execute("SELECT on_change FROM notifiers")
     except sqlite3.OperationalError:
-        logger.debug("Altering database. Updating database table notifiers.")
+        logger.info("Altering database. Updating database table notifiers.")
         c_db.execute(
             "ALTER TABLE notifiers ADD COLUMN on_change INTEGER DEFAULT 0"
         )
@@ -2413,7 +2519,7 @@ def dbcheck():
     try:
         c_db.execute("SELECT on_plexpydbcorrupt FROM notifiers")
     except sqlite3.OperationalError:
-        logger.debug("Altering database. Updating database table notifiers.")
+        logger.info("Altering database. Updating database table notifiers.")
         c_db.execute(
             "ALTER TABLE notifiers ADD COLUMN on_plexpydbcorrupt INTEGER DEFAULT 0"
         )
@@ -2428,7 +2534,7 @@ def dbcheck():
     try:
         c_db.execute("SELECT on_error FROM notifiers")
     except sqlite3.OperationalError:
-        logger.debug("Altering database. Updating database table notifiers.")
+        logger.info("Altering database. Updating database table notifiers.")
         c_db.execute(
             "ALTER TABLE notifiers ADD COLUMN on_error INTEGER DEFAULT 0"
         )
@@ -2443,7 +2549,7 @@ def dbcheck():
     try:
         c_db.execute("SELECT on_intro FROM notifiers")
     except sqlite3.OperationalError:
-        logger.debug("Altering database. Updating database table notifiers.")
+        logger.info("Altering database. Updating database table notifiers.")
         c_db.execute(
             "ALTER TABLE notifiers ADD COLUMN on_intro INTEGER DEFAULT 0"
         )
@@ -2467,7 +2573,7 @@ def dbcheck():
     try:
         c_db.execute("SELECT on_commercial FROM notifiers")
     except sqlite3.OperationalError:
-        logger.debug("Altering database. Updating database table notifiers.")
+        logger.info("Altering database. Updating database table notifiers.")
         c_db.execute(
             "ALTER TABLE notifiers ADD COLUMN on_commercial INTEGER DEFAULT 0"
         )
@@ -2478,11 +2584,26 @@ def dbcheck():
             "ALTER TABLE notifiers ADD COLUMN on_commercial_body TEXT"
         )
 
+    # Upgrade notifiers table from earlier versions
+    try:
+        c_db.execute("SELECT on_tokenexpired FROM notifiers")
+    except sqlite3.OperationalError:
+        logger.info("Altering database. Updating database table notifiers.")
+        c_db.execute(
+            "ALTER TABLE notifiers ADD COLUMN on_tokenexpired INTEGER DEFAULT 0"
+        )
+        c_db.execute(
+            "ALTER TABLE notifiers ADD COLUMN on_tokenexpired_subject TEXT"
+        )
+        c_db.execute(
+            "ALTER TABLE notifiers ADD COLUMN on_tokenexpired_body TEXT"
+        )
+
     # Upgrade tvmaze_lookup table from earlier versions
     try:
         c_db.execute("SELECT rating_key FROM tvmaze_lookup")
     except sqlite3.OperationalError:
-        logger.debug("Altering database. Updating database table tvmaze_lookup.")
+        logger.info("Altering database. Updating database table tvmaze_lookup.")
         c_db.execute(
             "ALTER TABLE tvmaze_lookup ADD COLUMN rating_key INTEGER"
         )
@@ -2497,7 +2618,7 @@ def dbcheck():
     try:
         c_db.execute("SELECT rating_key FROM themoviedb_lookup")
     except sqlite3.OperationalError:
-        logger.debug("Altering database. Updating database table themoviedb_lookup.")
+        logger.info("Altering database. Updating database table themoviedb_lookup.")
         c_db.execute(
             "ALTER TABLE themoviedb_lookup ADD COLUMN rating_key INTEGER"
         )
@@ -2512,7 +2633,7 @@ def dbcheck():
     try:
         c_db.execute("SELECT success FROM user_login")
     except sqlite3.OperationalError:
-        logger.debug("Altering database. Updating database table user_login.")
+        logger.info("Altering database. Updating database table user_login.")
         c_db.execute(
             "ALTER TABLE user_login ADD COLUMN success INTEGER DEFAULT 1"
         )
@@ -2521,7 +2642,7 @@ def dbcheck():
     try:
         c_db.execute("SELECT expiry FROM user_login")
     except sqlite3.OperationalError:
-        logger.debug("Altering database. Updating database table user_login.")
+        logger.info("Altering database. Updating database table user_login.")
         c_db.execute(
             "ALTER TABLE user_login ADD COLUMN expiry TEXT"
         )
@@ -2535,7 +2656,7 @@ def dbcheck():
                           "OR agent_label = 'OSX Notify' "
                           "OR agent_name = 'androidapp'").fetchone()
     if result:
-        logger.debug("Altering database. Renaming notifiers.")
+        logger.info("Altering database. Renaming notifiers.")
         c_db.execute(
             "UPDATE notifiers SET agent_label = 'Kodi' WHERE agent_label = 'XBMC'"
         )
@@ -2551,13 +2672,18 @@ def dbcheck():
     try:
         c_db.execute("SELECT thumb_level FROM exports")
     except sqlite3.OperationalError:
-        logger.debug("Altering database. Updating database table exports.")
+        logger.info("Altering database. Updating database table exports.")
         c_db.execute(
             "ALTER TABLE exports ADD COLUMN thumb_level INTEGER DEFAULT 0"
         )
         c_db.execute(
             "UPDATE exports SET thumb_level = 9 WHERE include_thumb = 1"
         )
+
+    # Upgrade exports table from earlier versions
+    try:
+        c_db.execute("SELECT art_level FROM exports")
+    except sqlite3.OperationalError:
         c_db.execute(
             "ALTER TABLE exports ADD COLUMN art_level INTEGER DEFAULT 0"
         )
@@ -2569,7 +2695,7 @@ def dbcheck():
     try:
         c_db.execute("SELECT title FROM exports")
     except sqlite3.OperationalError:
-        logger.debug("Altering database. Updating database table exports.")
+        logger.info("Altering database. Updating database table exports.")
         c_db.execute(
             "ALTER TABLE exports ADD COLUMN title TEXT"
         )
@@ -2581,7 +2707,7 @@ def dbcheck():
     try:
         c_db.execute("SELECT total_items FROM exports")
     except sqlite3.OperationalError:
-        logger.debug("Altering database. Updating database table exports.")
+        logger.info("Altering database. Updating database table exports.")
         c_db.execute(
             "ALTER TABLE exports ADD COLUMN exported_items INTEGER DEFAULT 0"
         )
@@ -2593,10 +2719,35 @@ def dbcheck():
     try:
         c_db.execute("SELECT logo_level FROM exports")
     except sqlite3.OperationalError:
-        logger.debug("Altering database. Updating database table exports.")
+        logger.info("Altering database. Updating database table exports.")
         c_db.execute(
             "ALTER TABLE exports ADD COLUMN logo_level INTEGER DEFAULT 0"
         )
+
+    # Upgrade exports table from earlier versions
+    try:
+        c_db.execute("SELECT squareArt_level FROM exports")
+    except sqlite3.OperationalError:
+        logger.info("Altering database. Updating database table exports.")
+        c_db.execute(
+            "ALTER TABLE exports ADD COLUMN squareArt_level INTEGER DEFAULT 0"
+        )
+
+    # Upgrade exports table from earlier versions
+    try:
+        c_db.execute("SELECT theme_level FROM exports")
+    except sqlite3.OperationalError:
+        logger.info("Altering database. Updating database table exports.")
+        c_db.execute(
+            "ALTER TABLE exports ADD COLUMN theme_level INTEGER DEFAULT 0"
+        )
+
+    # Upgrade image_hash_lookup table from earlier versions
+    try:
+        c_db.execute("DELETE FROM image_hash_lookup "
+                     "WHERE img LIKE 'http%'")
+    except sqlite3.OperationalError:
+        pass
 
     # Fix unique constraints
     try:
@@ -2638,13 +2789,24 @@ def dbcheck():
     # Add "Local" user to database as default unauthenticated user.
     result = c_db.execute("SELECT id FROM users WHERE username = 'Local'")
     if not result.fetchone():
-        logger.debug("User 'Local' does not exist. Adding user.")
+        logger.info("User 'Local' does not exist. Adding user.")
         c_db.execute("INSERT INTO users (user_id, username) VALUES (0, 'Local')")
 
+    logger.info("Database upgrade complete.")
+
+    logger.info("Creating database indices....")
+
     # Create session_history table indices
+    # reference_id trails started so the history page bound reads a
+    # page's group keys straight out of the index. The leading column
+    # still serves every query that filtered on started alone.
     c_db.execute(
-        "CREATE INDEX IF NOT EXISTS idx_session_history_media_type "
-        "ON session_history (media_type)"
+        "CREATE INDEX IF NOT EXISTS idx_session_history_started_reference_id "
+        "ON session_history (started, reference_id)"
+    )
+    c_db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_session_history_stopped "
+        "ON session_history (stopped)"
     )
     c_db.execute(
         "CREATE INDEX IF NOT EXISTS idx_session_history_media_type_stopped "
@@ -2667,16 +2829,20 @@ def dbcheck():
         "ON session_history (user)"
     )
     c_db.execute(
-        "CREATE INDEX IF NOT EXISTS idx_session_history_user_id "
-        "ON session_history (user_id)"
+        "CREATE INDEX IF NOT EXISTS idx_session_history_user_id_started "
+        "ON session_history (user_id, started ASC)"
     )
     c_db.execute(
         "CREATE INDEX IF NOT EXISTS idx_session_history_user_id_stopped "
         "ON session_history (user_id, stopped ASC)"
     )
     c_db.execute(
-        "CREATE INDEX IF NOT EXISTS idx_session_history_section_id "
-        "ON session_history (section_id)"
+        "CREATE INDEX IF NOT EXISTS idx_session_history_user_id_rating_key "
+        "ON session_history (user_id, rating_key)"
+    )
+    c_db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_session_history_section_id_started "
+        "ON session_history (section_id, started ASC)"
     )
     c_db.execute(
         "CREATE INDEX IF NOT EXISTS idx_session_history_section_id_stopped "
@@ -2687,6 +2853,15 @@ def dbcheck():
         "ON session_history (reference_id ASC)"
     )
 
+    # Drop redundant single-column indices that are fully covered by a
+    # composite index with the same leading column. They served no query
+    # the composites cannot, and each one added a B-tree update to every
+    # session_history write.
+    c_db.execute("DROP INDEX IF EXISTS idx_session_history_started")
+    c_db.execute("DROP INDEX IF EXISTS idx_session_history_media_type")
+    c_db.execute("DROP INDEX IF EXISTS idx_session_history_user_id")
+    c_db.execute("DROP INDEX IF EXISTS idx_session_history_section_id")
+
     # Create session_history_metadata table indices
     c_db.execute(
         "CREATE INDEX IF NOT EXISTS idx_session_history_metadata_rating_key "
@@ -2696,15 +2871,66 @@ def dbcheck():
         "CREATE INDEX IF NOT EXISTS idx_session_history_metadata_guid "
         "ON session_history_metadata (guid)"
     )
+    # SQLite's LIKE-prefix optimization requires a NOCASE collated index
+    # (case_sensitive_like is never enabled); serves the history guid
+    # filter and the live-TV metadata fallback, which use guid LIKE 'x%'
+    c_db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_session_history_metadata_guid_nocase "
+        "ON session_history_metadata (guid COLLATE NOCASE)"
+    )
     c_db.execute(
         "CREATE INDEX IF NOT EXISTS idx_session_history_metadata_live "
         "ON session_history_metadata (live)"
+    )
+    c_db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_session_history_metadata_parent_rating_key "
+        "ON session_history_metadata (parent_rating_key)"
+    )
+    c_db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_session_history_metadata_grandparent_rating_key "
+        "ON session_history_metadata (grandparent_rating_key)"
     )
 
     # Create session_history_media_info table indices
     c_db.execute(
         "CREATE INDEX IF NOT EXISTS idx_session_history_media_info_transcode_decision "
         "ON session_history_media_info (transcode_decision)"
+    )
+
+    # Create notify_log table indices
+    c_db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_notify_log_session "
+        "ON notify_log (session_key, rating_key, user_id)"
+    )
+    c_db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_notify_log_timestamp "
+        "ON notify_log (timestamp)"
+    )
+    c_db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_notify_log_action_tag "
+        "ON notify_log (notify_action, tag)"
+    )
+    c_db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_notify_log_notifier_id "
+        "ON notify_log (notifier_id, timestamp)"
+    )
+
+    # Create user_login table indices
+    # jwt_token is looked up on every authenticated web request, and
+    # ip_address is scanned by the sign-in rate limiter
+    c_db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_user_login_jwt_token "
+        "ON user_login (jwt_token)"
+    )
+    c_db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_user_login_ip_address "
+        "ON user_login (ip_address, timestamp)"
+    )
+
+    # Create recently_added table indices
+    c_db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_recently_added_rating_key "
+        "ON recently_added (rating_key)"
     )
 
     # Create lookup table indices
@@ -2737,6 +2963,36 @@ def dbcheck():
         "ON sessions_continued (user_id, machine_id, media_type)"
     )
 
+    logger.info("Database indices created.")
+
+    # Give every history row its group key.
+    #
+    # write_session_history inserts the row and group_history sets
+    # reference_id in a second statement. Everything that reads history
+    # groups by this column, so a row that never got one joins a single
+    # nameless group holding every other row that lost its key, and its
+    # play time lands on a group it has nothing to do with. The repair
+    # matches what group_history writes for a row it does not group. The
+    # row becomes its own group.
+    c_db.execute("UPDATE session_history SET reference_id = id WHERE reference_id IS NULL")
+
+    # The trigger fills the key inside the insert itself, so no insert
+    # path can leave it out: the importers and a database merge write
+    # history rows without going through group_history at all.
+    c_db.execute(
+        "CREATE TRIGGER IF NOT EXISTS session_history_reference_id "
+        "AFTER INSERT ON session_history WHEN NEW.reference_id IS NULL "
+        "BEGIN UPDATE session_history SET reference_id = NEW.id WHERE id = NEW.id; END"
+    )
+
+    # Refresh the query planner statistics (bounded by analysis_limit).
+    # This cannot be left to the scheduled "PRAGMA optimize": before
+    # SQLite 3.46 that pragma only considers tables already queried on
+    # the same connection, so on a fresh connection it is a no-op and
+    # sqlite_stat1 may otherwise never be populated.
+    c_db.execute("PRAGMA analysis_limit=400")
+    c_db.execute("ANALYZE")
+
     # Set database version
     result = c_db.execute("SELECT value FROM version_info WHERE key = 'version'").fetchone()
     if not result:
@@ -2759,7 +3015,7 @@ def dbcheck():
         result = db.select("SELECT SQL FROM sqlite_master WHERE type='table' AND name='poster_urls'")
         if result:
             result = db.select("SELECT * FROM poster_urls")
-            logger.debug("Altering database. Updating database table imgur_lookup.")
+            logger.info("Altering database. Updating database table imgur_lookup.")
 
             data_factory = datafactory.DataFactory()
 
@@ -2773,15 +3029,6 @@ def dbcheck():
             db.action('DROP TABLE poster_urls')
     except sqlite3.OperationalError:
         pass
-
-
-def upgrade():
-    if CONFIG.UPGRADE_FLAG == 0:
-        mobile_app.revalidate_onesignal_ids()
-        CONFIG.UPGRADE_FLAG = 1
-        CONFIG.write()
-
-    return
 
 
 def shutdown(restart=False, update=False, checkout=False, reset=False):
@@ -2799,6 +3046,7 @@ def shutdown(restart=False, update=False, checkout=False, reset=False):
     # Stop the notification threads
     for i in range(CONFIG.NOTIFICATION_THREADS):
         NOTIFY_QUEUE.put(None)
+    newsletter_handler.NEWSLETTER_QUEUE.put(None)
 
     CONFIG.write()
 
@@ -2807,21 +3055,21 @@ def shutdown(restart=False, update=False, checkout=False, reset=False):
         try:
             versioncheck.update()
         except Exception as e:
-            logger.warn("Tautulli failed to update: %s. Restarting." % e)
+            logger.warn("Tautulli failed to update: %s. Restarting." % e, exc_info=True)
 
     if checkout:
         logger.info("Tautulli is switching the git branch...")
         try:
             versioncheck.checkout_git_branch()
         except Exception as e:
-            logger.warn("Tautulli failed to switch git branch: %s. Restarting." % e)
+            logger.warn("Tautulli failed to switch git branch: %s. Restarting." % e, exc_info=True)
 
     if reset:
         logger.info("Tautulli is resetting the git install...")
         try:
             versioncheck.reset_git_install()
         except Exception as e:
-            logger.warn("Tautulli failed to reset git install: %s. Restarting." % e)
+            logger.warn("Tautulli failed to reset git install: %s. Restarting." % e, exc_info=True)
 
     if CREATEPID:
         logger.info("Removing PID file: %s", PIDFILE)
@@ -2870,8 +3118,49 @@ def shutdown(restart=False, update=False, checkout=False, reset=False):
     os._exit(0)
 
 
+def generate_first_run_password():
+    """ Set a random password on a first run or a no-password upgrade, and log it once. """
+    if CONFIG.HTTP_PASSWORD or (CONFIG.FIRST_RUN_COMPLETE and not CONFIG.no_password_upgrade):
+        return
+
+    password = secrets.token_urlsafe(12)
+    if not CONFIG.HTTP_USERNAME:
+        CONFIG.HTTP_USERNAME = 'tautulli'
+    CONFIG.HTTP_PASSWORD = make_hash(password)
+    # The login page shows a notice while this password is in use
+    CONFIG.HTTP_GENERATED_PASSWORD = CONFIG.HTTP_PASSWORD
+    CONFIG.HTTP_HASH_PASSWORD = 1
+    CONFIG.HTTP_HASHED_PASSWORD = 1
+    CONFIG.JWT_SECRET = generate_uuid()
+    CONFIG.write()
+    title = "Tautulli login" if CONFIG.FIRST_RUN_COMPLETE else "Setup wizard login"
+    lines = [title, "Username: %s    Password: %s" % (CONFIG.HTTP_USERNAME, password)]
+    width = max(len(x) for x in lines) + 4
+    for line in ["*" * width] + ["* " + x.ljust(width - 4) + " *" for x in lines] + ["*" * width]:
+        logger.info(line)
+
+
 def generate_uuid():
     return uuid.uuid4().hex
+
+
+def run_analytics(first_run=False):
+    if not CONFIG.SYSTEM_ANALYTICS:
+        logger.info("System analytics disabled. No analytics events will be sent.")
+        return
+
+    logger.info("System analytics enabled. Sending analytics events...")
+
+    global TRACKER
+    TRACKER = initialize_tracker()
+
+    # Send system analytics events
+    if first_run:
+        send_analytics(name='install')
+    elif _UPDATE:
+        send_analytics(name='update')
+
+    send_analytics(name='start')
 
 
 def initialize_tracker():
@@ -2883,17 +3172,29 @@ def initialize_tracker():
     return tracker
 
 
+def send_analytics(name, **kwargs):
+    if not TRACKER:
+        return
+
+    threading.Thread(target=analytics_event, args=(name,), kwargs=kwargs).start()
+
+
 def analytics_event(name, **kwargs):
+    if not TRACKER:
+        return
+    
     event = TRACKER.create_new_event(name=name)
     event.set_event_param('name', common.PRODUCT)
     event.set_event_param('version', common.RELEASE)
     event.set_event_param('install', INSTALL_TYPE)
     event.set_event_param('branch', CONFIG.GIT_BRANCH)
     event.set_event_param('platform', common.PLATFORM)
+    event.set_event_param('platformArchitecture', common.PLATFORM_ARCHITECTURE)
     event.set_event_param('platformRelease', common.PLATFORM_RELEASE)
     event.set_event_param('platformVersion', common.PLATFORM_VERSION[:100])
     event.set_event_param('linuxDistro', common.PLATFORM_LINUX_DISTRO)
     event.set_event_param('pythonVersion', common.PYTHON_VERSION)
+    event.set_event_param('sqliteVersion', common.SQLITE_VERSION)
     event.set_event_param('language', SYS_LANGUAGE)
     event.set_event_param('encoding', SYS_ENCODING)
     event.set_event_param('timezone', str(SYS_TIMEZONE))
@@ -2902,18 +3203,23 @@ def analytics_event(name, **kwargs):
     for key, value in kwargs.items():
         event.set_event_param(key, value)
 
-    plex_tv = plextv.PlexTV()
-    ip_address = plex_tv.get_public_ip(output_format='text')
-    geolocation = plex_tv.get_geoip_lookup(ip_address) or {}
+    try:
+        plex_tv = plextv.PlexTV()
+        ip_address = plex_tv.get_public_ip(output_format='text')
+        geolocation = plex_tv.get_geoip_lookup(ip_address) or {}
 
-    event.set_event_param('country', geolocation.get('country', 'Unknown'))
-    event.set_event_param('countryCode', geolocation.get('code', 'Unknown'))
+        event.set_event_param('country', geolocation.get('country', 'Unknown'))
+        event.set_event_param('countryCode', geolocation.get('code', 'Unknown'))
+    except Exception as e:
+        logger.warn("Failed to get country location information: %s", e)
+        event.set_event_param('country', 'Unknown')
+        event.set_event_param('countryCode', 'Unknown')
 
-    if TRACKER:
-        try:
-            TRACKER.send(events=[event])
-        except Exception as e:
-            logger.warn("Failed to send analytics event for name '%s': %s" % (name, e))
+    try:
+        TRACKER.send(events=[event])
+        logger.info("Sent analytics event for name '%s'", name)
+    except Exception as e:
+        logger.warn("Failed to send analytics event for name '%s': %s", name, e)
 
 
 def check_folder_writable(folder, fallback, name):

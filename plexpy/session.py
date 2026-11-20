@@ -15,11 +15,20 @@
 #  You should have received a copy of the GNU General Public License
 #  along with Tautulli.  If not, see <http://www.gnu.org/licenses/>.
 
+import secrets
+
 import cherrypy
 
 import plexpy
 from plexpy import common
 from plexpy import users
+
+
+def generate_csrf_token():
+    """
+    Generates a CSRF token for the current session
+    """
+    return secrets.token_urlsafe(32)
 
 
 def get_session_info():
@@ -35,6 +44,27 @@ def get_session_info():
         return cherrypy.request.login
 
     return _session
+
+
+def get_session_csrf_token():
+    """
+    Returns the CSRF token for the current logged in session
+    """
+    # Session locking is 'explicit'. Acquire the lock before the first
+    # session access: loading happens lazily on first access, and two
+    # parallel first renders (e.g. tabs restored after a restart, when
+    # the RAM session store is empty) must not each load their own empty
+    # copy and mint different tokens. Only HTML page renders take this
+    # lock; XHRs and images never touch the session. CherryPy releases
+    # the lock ONCE automatically when the request ends, so a request
+    # must never acquire it twice (the login handlers also acquire
+    # before this runs via the template render).
+    if not cherrypy.session.locked:
+        cherrypy.session.acquire_lock()
+    if '_csrf_token' not in cherrypy.session:
+        cherrypy.session['_csrf_token'] = generate_csrf_token()
+    return cherrypy.session['_csrf_token']
+
 
 def get_session_user():
     """
@@ -163,6 +193,12 @@ def filter_session_info(list_of_dicts, filter_key=None):
         for d in list_of_dicts:
             if str(d.get('section_id','')) not in session_library_ids:
                 continue
+
+            # Rows without a media type cannot be evaluated against the
+            # library content filters; keep them (they already passed the
+            # shared-library check). Previously `keep` leaked from the
+            # prior iteration or was unbound on the first.
+            keep = True
 
             if d.get('media_type'):
                 f_content_rating, f_labels = get_session_library_filters_type(session_library_filters,

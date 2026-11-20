@@ -16,6 +16,7 @@
 #  along with Tautulli.  If not, see <http://www.gnu.org/licenses/>.
 
 import collections
+from http.cookiejar import DefaultCookiePolicy
 from xml.dom import minidom
 
 from bs4 import BeautifulSoup
@@ -30,6 +31,18 @@ from plexpy import logger
 # Dictionary with last request times, for rate limiting.
 last_requests = collections.defaultdict(int)
 fake_lock = lock.FakeLock()
+
+# Shared session so repeated requests to the same host reuse the TCP/TLS
+# connection instead of paying a fresh handshake per call. Cookie storage
+# is disabled: the session is shared by unrelated notifier/newsletter/
+# versioncheck calls (previously each used a fresh request), and the
+# cookie jar is not safe for concurrent mutation anyway.
+_session = requests.Session()
+_session.cookies.set_policy(DefaultCookiePolicy(allowed_domains=[]))
+
+# Default (connect, read) timeout so a hung remote endpoint cannot block
+# a worker thread forever; callers may override via kwargs
+DEFAULT_TIMEOUT = (10, 60)
 
 
 def request_response(url, method="get", auto_raise=True,
@@ -56,9 +69,11 @@ def request_response(url, method="get", auto_raise=True,
     if not kwargs['verify']:
         urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-    # Map method to the request.XXX method. This is a simple hack, but it
+    kwargs.setdefault("timeout", DEFAULT_TIMEOUT)
+
+    # Map method to the session.XXX method. This is a simple hack, but it
     # allows requests to apply more magic per method. See lib/requests/api.py.
-    request_method = getattr(requests, method.lower())
+    request_method = getattr(_session, method.lower())
 
     try:
         # Request URL and wait for response
@@ -144,13 +159,16 @@ def request_response2(url, method="get", auto_raise=True,
 
     # Disable verification of SSL certificates if requested. Note: this could
     # pose a security issue!
-    kwargs['verify'] = bool(plexpy.CONFIG.VERIFY_SSL_CERT)
+    # A caller can pass verify to require it for a single request regardless.
+    kwargs.setdefault('verify', bool(plexpy.CONFIG.VERIFY_SSL_CERT))
     if not kwargs['verify']:
         urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-    # Map method to the request.XXX method. This is a simple hack, but it
+    kwargs.setdefault('timeout', DEFAULT_TIMEOUT)
+
+    # Map method to the session.XXX method. This is a simple hack, but it
     # allows requests to apply more magic per method. See lib/requests/api.py.
-    request_method = getattr(requests, method.lower())
+    request_method = getattr(_session, method.lower())
 
     response = None
     err_msg = http_err = req_msg = None
